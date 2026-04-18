@@ -20,7 +20,8 @@ log = logging.getLogger(__name__)
 
 
 def get_sync_conn() -> PGConnection:
-    return psycopg2.connect(settings.sync_database_url)
+    dsn = settings.sync_database_url.replace("postgresql+psycopg2://", "postgresql://")
+    return psycopg2.connect(dsn)
 
 
 # ── Vehicle upsert ──────────────────────────────────────────────────────────────
