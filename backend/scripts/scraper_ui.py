@@ -11,6 +11,7 @@ Features:
     - Tails scraper_local.log in real time
     - Shows checkpoint, DB stats, pending details count
 """
+import json
 import subprocess
 import sys
 from collections import deque
@@ -106,6 +107,15 @@ HTML = """<!DOCTYPE html>
       <div class="stat"><span class="stat-label">Last DB update</span><span id="stat-last" class="stat-value">—</span></div>
       <div class="stat"><span class="stat-label">Process PID</span><span id="stat-pid" class="stat-value">—</span></div>
     </div>
+  </div>
+
+  <div class="card" style="margin-top: 16px;">
+    <h2>Inspect detail page <span style="color:#8b94a3; font-weight:400; text-transform:none; letter-spacing:0; font-size:11px;">(scraper must be stopped)</span></h2>
+    <div class="row">
+      <input type="text" id="inspect-url" placeholder="https://turbo.az/autos/12345678-..." style="flex:1; min-width:280px;" />
+      <button id="btn-inspect" class="secondary">Inspect</button>
+    </div>
+    <pre class="log" id="inspect-out" style="height: 260px;">Paste a turbo.az detail URL and click Inspect to see tel: links, parsed seller, and seller-container HTML.</pre>
   </div>
 
   <div class="card" style="margin-top: 16px;">
@@ -207,6 +217,18 @@ $('btn-stop').onclick = async () => {
   if (!confirm('Stop scraper?')) return;
   await api('/api/stop', 'POST');
   refreshStatus();
+};
+
+$('btn-inspect').onclick = async () => {
+  const url = $('inspect-url').value.trim();
+  if (!url) { alert('Paste a URL first'); return; }
+  $('inspect-out').textContent = 'Loading… (this opens a browser page, takes a few seconds)';
+  try {
+    const r = await api('/api/inspect?url=' + encodeURIComponent(url));
+    $('inspect-out').textContent = JSON.stringify(r, null, 2);
+  } catch (e) {
+    $('inspect-out').textContent = 'Error: ' + e.message;
+  }
 };
 
 loadMakes();
@@ -330,6 +352,87 @@ def api_start(
         stderr=subprocess.DEVNULL,
     )
     return {"started": True, "pid": _proc.pid, "args": args[1:]}
+
+
+@app.get("/api/inspect")
+def api_inspect(url: str):
+    """
+    Load a detail page in a fresh browser page and return:
+      - parsed seller dict (what update_vehicle_detail would store)
+      - all tel: links found
+      - HTML snippet of the seller-area container
+    Useful for diagnosing why seller/phone fields come back empty.
+    Requires scraper NOT to be running (shares the CDP browser).
+    """
+    global _proc
+    if _proc is not None and _proc.poll() is None:
+        return JSONResponse(
+            {"error": "stop the scraper before using inspect (shared browser)"},
+            status_code=400,
+        )
+
+    from app.scraper.browser import BrowserManager
+    from app.scraper.detail_scraper import scrape_detail, _parse_seller
+
+    browser = BrowserManager()
+    browser.start()
+    try:
+        page = browser.new_page()
+        try:
+            page.goto(url, wait_until="load", timeout=30_000)
+        except Exception as e:
+            return {"error": f"page load failed: {e}"}
+
+        # Raw tel: hrefs
+        try:
+            tel_hrefs = page.eval_on_selector_all(
+                'a[href^="tel:"]',
+                "els => els.map(e => e.getAttribute('href'))",
+            )
+        except Exception as e:
+            tel_hrefs = [f"error: {e}"]
+
+        # Seller container HTML (try several roots)
+        seller_html = None
+        for sel in [
+            ".product-owner",
+            ".product-owner__info",
+            ".shop-owner",
+            ".seller-info",
+            ".product-phones",
+        ]:
+            try:
+                el = page.query_selector(sel)
+                if el:
+                    seller_html = {
+                        "selector": sel,
+                        "html": el.evaluate("e => e.outerHTML")[:4000],
+                    }
+                    break
+            except Exception:
+                continue
+
+        # Full parsed detail
+        try:
+            full = scrape_detail(page, url)
+        except Exception as e:
+            full = {"error": str(e)}
+
+        try:
+            parsed_seller = _parse_seller(page)
+        except Exception as e:
+            parsed_seller = {"error": str(e)}
+
+        browser.close_page(page)
+        return {
+            "url": url,
+            "tel_hrefs": tel_hrefs,
+            "parsed_seller": parsed_seller,
+            "parsed_city": full.get("city") if isinstance(full, dict) else None,
+            "seller_container": seller_html,
+        }
+    finally:
+        browser.stop()
 
 
 @app.post("/api/stop")
