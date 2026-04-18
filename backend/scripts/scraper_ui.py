@@ -87,9 +87,12 @@ HTML = """<!DOCTYPE html>
       <div class="row">
         <label>Make:</label>
         <select id="make-select" style="min-width: 160px;"><option value="">(load…)</option></select>
-        <button id="btn-make">Scan this make</button>
+        <button id="btn-make">Full scan make</button>
+        <button id="btn-make-details" class="secondary">Details only (make)</button>
+        <button id="btn-make-listings" class="secondary">Listings only (make)</button>
       </div>
       <div class="row">
+        <label style="color:#8b94a3;">All makes:</label>
         <button id="btn-details" class="secondary">Details only</button>
         <button id="btn-listings" class="secondary">Listings only</button>
       </div>
@@ -210,6 +213,16 @@ $('btn-make').onclick = () => {
   const m = $('make-select').value;
   if (!m) { alert('Pick a make first'); return; }
   start({ mode: 'single', make: m });
+};
+$('btn-make-details').onclick = () => {
+  const m = $('make-select').value;
+  if (!m) { alert('Pick a make first'); return; }
+  start({ mode: 'details', make: m });
+};
+$('btn-make-listings').onclick = () => {
+  const m = $('make-select').value;
+  if (!m) { alert('Pick a make first'); return; }
+  start({ mode: 'listings', make: m });
 };
 $('btn-details').onclick = () => start({ mode: 'details' });
 $('btn-listings').onclick = () => start({ mode: 'listings' });
@@ -332,8 +345,12 @@ def api_start(
         args += ["--make", make]
     elif mode == "details":
         args += ["--details-only", "--skip-lifecycle"]
+        if make:
+            args += ["--make", make]
     elif mode == "listings":
         args += ["--skip-details"]
+        if make:
+            args += ["--make", make]
     elif mode == "fresh":
         args += ["--fresh"]
     elif mode != "full":

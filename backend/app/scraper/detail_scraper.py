@@ -3,6 +3,7 @@ Detail page scraper — fetches /autos/{turbo_id} and extracts full vehicle data
 
 Collects: images, all spec table fields, description, seller info, view count.
 """
+import json
 import logging
 import re
 from typing import Optional
@@ -120,102 +121,121 @@ def _parse_seller(page: Page) -> dict:
     """
     Extract seller info from a turbo.az detail page.
 
-    Strategy:
-      - Phones: collect all `a[href^="tel:"]` anywhere on the page. This is the
-        most reliable signal — phones are encoded into the tel: link value even
-        when the visible text is styled/split. Falls back to a reveal-button
-        click if none are found on first pass.
-      - Name/city/profile: try a few known class patterns, then fall back to
-        heuristics.
-      - Dealer vs private: if any tel: link lives inside a shop/dealer container
-        OR the profile link points to /shops/, mark as 'dealer'; else private.
+    DOM reference (verified 2026-04):
+      .product-owner
+        .product-owner__info
+          .product-owner__info-name      → name
+          .product-owner__info-region    → city
+          .product-owner__info-regdate   → "Satıcı MM.YYYY tarixindən ..." (join date)
+      .product-phones.js-phone-reveal
+        .product-phones__btn.js-phone-reveal-btn   → click to reveal
+        .product-phones__list
+          a.product-phones__list-i[href^="tel:"]   → one <a> per phone number
+
+      #chat-write-link
+        data-user      → numeric turbo.az user id (stable, unique per seller)
+        data-receiver  → JSON with {id, name, phones: [...]} (phones available
+                         WITHOUT clicking reveal — use as primary source)
     """
     seller: dict = {}
 
-    # ── Phones (via tel: links — most reliable) ─────────────────────────────
+    # ── Try the chat-button data first (no click needed) ────────────────────
+    turbo_user_id = None
     phones_raw: list[str] = []
     try:
-        phones_raw = page.eval_on_selector_all(
-            'a[href^="tel:"]',
-            "els => Array.from(new Set(els.map(e => (e.getAttribute('href') || '').replace(/^tel:/, '').trim()).filter(Boolean)))",
-        )
+        chat_el = page.query_selector("#chat-write-link")
+        if chat_el:
+            du = chat_el.get_attribute("data-user")
+            if du and du.isdigit():
+                turbo_user_id = du
+            dr = chat_el.get_attribute("data-receiver")
+            if dr:
+                try:
+                    payload = json.loads(dr)
+                    if isinstance(payload, dict):
+                        if not turbo_user_id and payload.get("id"):
+                            turbo_user_id = str(payload["id"])
+                        if isinstance(payload.get("phones"), list):
+                            phones_raw = [p for p in payload["phones"] if p]
+                        if not seller.get("name") and payload.get("name"):
+                            seller["name"] = payload["name"]
+                except Exception:
+                    pass
     except Exception:
         pass
 
-    # Fallback: try clicking a reveal button, then re-query
-    if not phones_raw:
+    if turbo_user_id:
+        seller["turbo_seller_id"] = turbo_user_id
+
+    # ── Phones: reveal button click fallback (for tel: hrefs) ───────────────
+    tel_hrefs: list[str] = []
+    try:
+        tel_hrefs = page.eval_on_selector_all(
+            'a.product-phones__list-i[href^="tel:"], a[href^="tel:"]',
+            "els => Array.from(new Set(els.map(e => (e.getAttribute('href') || '').replace(/^tel:/, '').trim()).filter(Boolean)))",
+        )
+    except Exception:
+        tel_hrefs = []
+
+    if not tel_hrefs:
         try:
-            reveal = page.query_selector(
-                'button:has-text("Nömrə"), button:has-text("Göstər"), button.show-phones, '
-                '.phone-reveal, .show-number-btn, .product-phones__reveal'
-            )
-            if reveal:
-                reveal.click()
-                page.wait_for_timeout(1_000)
-                phones_raw = page.eval_on_selector_all(
-                    'a[href^="tel:"]',
+            btn = page.query_selector(".product-phones__btn.js-phone-reveal-btn")
+            if btn:
+                btn.click()
+                # Wait up to 3s for the list to render
+                try:
+                    page.wait_for_selector(
+                        ".product-phones__list a.product-phones__list-i",
+                        timeout=3_000,
+                    )
+                except Exception:
+                    page.wait_for_timeout(500)
+                tel_hrefs = page.eval_on_selector_all(
+                    'a.product-phones__list-i[href^="tel:"], a[href^="tel:"]',
                     "els => Array.from(new Set(els.map(e => (e.getAttribute('href') || '').replace(/^tel:/, '').trim()).filter(Boolean)))",
                 )
         except Exception:
             pass
 
-    # Last resort: extract +994… / 0XX patterns from text in seller container
-    if not phones_raw:
-        try:
-            container_text = page.eval_on_selector(
-                ".product-owner, .product-owner__info, .shop-owner, .seller-info",
-                "el => el.innerText",
-            )
-            phones_raw = re.findall(
-                r"(?:\+?994|0)\s*\(?\d{2}\)?[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}",
-                container_text or "",
-            )
-        except Exception:
-            pass
-
+    # Prefer tel: hrefs (already in +994… form); fall back to data-receiver phones
+    if tel_hrefs:
+        phones_raw = tel_hrefs
     seller["phones"] = phones_raw
-    seller["phones_normalized"] = [normalize_phone(p) for p in phones_raw]
+    seller["phones_normalized"] = [
+        p for p in (normalize_phone(x) for x in phones_raw) if p
+    ]
 
-    # ── Name ────────────────────────────────────────────────────────────────
-    for sel in [
-        ".product-owner__info-title",
-        ".shop-owner__name",
-        ".seller-name",
-        ".product-owner__name",
-        ".shop-name",
-        ".product-owner a",  # profile link text
+    # ── Name / city / regdate from product-owner block ──────────────────────
+    for sel, key in [
+        (".product-owner__info-name", "name"),
+        (".product-owner__info-region", "city"),
+        (".product-owner__info-regdate", "regdate"),
     ]:
+        if seller.get(key):
+            continue
         try:
             el = page.query_selector(sel)
             if el:
                 txt = (el.inner_text() or "").strip()
                 if txt:
-                    seller["name"] = txt
-                    break
+                    seller[key] = txt
         except Exception:
             continue
 
-    # ── Profile URL (also used to detect dealer) ────────────────────────────
+    # ── Profile URL (shops link, if present) ────────────────────────────────
     profile_url = None
-    for sel in [
-        'a.product-owner__info-title',
-        'a.shop-owner__link',
-        '.product-owner a[href*="/shops/"]',
-        '.product-owner a[href*="/autos?"]',
-        'a.seller-profile-link',
-        'a.shop-link',
-    ]:
-        try:
-            el = page.query_selector(sel)
-            if el:
-                href = el.get_attribute("href")
-                if href:
-                    profile_url = (
-                        f"https://turbo.az{href}" if href.startswith("/") else href
-                    )
-                    break
-        except Exception:
-            continue
+    try:
+        el = page.query_selector(
+            '.product-owner a[href*="/shops/"], a.product-owner__info-title'
+        )
+        if el:
+            href = el.get_attribute("href")
+            if href:
+                profile_url = (
+                    f"https://turbo.az{href}" if href.startswith("/") else href
+                )
+    except Exception:
+        pass
     if profile_url:
         seller["profile_url"] = profile_url
 
@@ -225,34 +245,11 @@ def _parse_seller(page: Page) -> dict:
         is_dealer = True
     else:
         try:
-            if page.query_selector(
-                ".shop-badge, .dealer-badge, .seller-type-badge, "
-                ".product-owner__shop, .shop-owner"
-            ):
+            if page.query_selector(".product-owner__logo img, .shop-owner, .shop-badge"):
                 is_dealer = True
         except Exception:
             pass
     seller["seller_type"] = "dealer" if is_dealer else "private"
-
-    # ── City / region ───────────────────────────────────────────────────────
-    for sel in [
-        ".product-owner__region",
-        ".product-owner__city",
-        ".seller-city",
-        ".product-owner__info-region",
-    ]:
-        try:
-            el = page.query_selector(sel)
-            if el:
-                txt = (el.inner_text() or "").strip()
-                if txt:
-                    seller["city"] = txt
-                    break
-        except Exception:
-            continue
-
-    # Fallback: city is often in the first specs row ("Şəhər"), but that's
-    # already captured via the spec table on the caller side.
 
     return seller
 

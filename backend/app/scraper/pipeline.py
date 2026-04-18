@@ -168,40 +168,69 @@ def update_vehicle_detail(conn: PGConnection, vehicle_id: int, detail: dict):
 
 
 def upsert_seller(conn: PGConnection, seller: dict) -> Optional[int]:
-    """Find or create seller by normalized phone numbers. Returns seller_id."""
-    phones_normalized = [p for p in seller.get("phones_normalized", []) if len(p) >= 7]
-    if not phones_normalized:
+    """
+    Find or create a seller and return its id.
+
+    Identity resolution (in order):
+      1. turbo_seller_id (stable, unique per turbo.az account)
+      2. any normalized phone (phones_normalized unique index)
+      3. new row
+
+    On match, merges any newly-seen phones. Safe to call repeatedly.
+    """
+    turbo_id = seller.get("turbo_seller_id")
+    phones_raw = seller.get("phones", []) or []
+    phones_norm = [p for p in (seller.get("phones_normalized") or []) if len(p) >= 7]
+
+    if not turbo_id and not phones_norm:
         return None
 
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        # Try to find existing seller by any phone
-        cur.execute(
-            "SELECT seller_id FROM seller_phones WHERE normalized = ANY(%s) LIMIT 1",
-            (phones_normalized,),
-        )
-        row = cur.fetchone()
-        now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
 
-        if row:
-            seller_id = row["seller_id"]
-            cur.execute("UPDATE sellers SET last_seen = %s WHERE id = %s", (now, seller_id))
-            # Add any new phones
-            for raw, norm in zip(seller.get("phones", []), phones_normalized):
-                cur.execute(
-                    """
-                    INSERT INTO seller_phones (seller_id, phone, normalized)
-                    VALUES (%s, %s, %s) ON CONFLICT (normalized) DO NOTHING
-                    """,
-                    (seller_id, raw, norm),
-                )
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        seller_id = None
+
+        if turbo_id:
+            cur.execute(
+                "SELECT id FROM sellers WHERE turbo_seller_id = %s", (turbo_id,)
+            )
+            row = cur.fetchone()
+            if row:
+                seller_id = row["id"]
+
+        if seller_id is None and phones_norm:
+            cur.execute(
+                "SELECT seller_id FROM seller_phones WHERE normalized = ANY(%s) LIMIT 1",
+                (phones_norm,),
+            )
+            row = cur.fetchone()
+            if row:
+                seller_id = row["seller_id"]
+
+        if seller_id is not None:
+            # Update mutable fields (only if new value is non-null)
+            updates = {"last_seen": now}
+            for k in ("name", "seller_type", "city", "profile_url"):
+                v = seller.get(k)
+                if v:
+                    updates[k] = v
+            if turbo_id:
+                updates["turbo_seller_id"] = turbo_id
+            set_clause = ", ".join(f"{k} = %({k})s" for k in updates)
+            cur.execute(
+                f"UPDATE sellers SET {set_clause} WHERE id = %(id)s",
+                {**updates, "id": seller_id},
+            )
         else:
-            # Create new seller
             cur.execute(
                 """
-                INSERT INTO sellers (name, seller_type, city, profile_url, first_seen, last_seen)
-                VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
+                INSERT INTO sellers
+                  (turbo_seller_id, name, seller_type, city, profile_url, first_seen, last_seen)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
                 """,
                 (
+                    turbo_id,
                     seller.get("name"),
                     seller.get("seller_type", "private"),
                     seller.get("city"),
@@ -211,11 +240,16 @@ def upsert_seller(conn: PGConnection, seller: dict) -> Optional[int]:
                 ),
             )
             seller_id = cur.fetchone()["id"]
-            for raw, norm in zip(seller.get("phones", []), phones_normalized):
-                cur.execute(
-                    "INSERT INTO seller_phones (seller_id, phone, normalized) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
-                    (seller_id, raw, norm),
-                )
+
+        # Merge phones (normalized has a unique index — ON CONFLICT no-op)
+        for raw, norm in zip(phones_raw, phones_norm):
+            cur.execute(
+                """
+                INSERT INTO seller_phones (seller_id, phone, normalized)
+                VALUES (%s, %s, %s) ON CONFLICT (normalized) DO NOTHING
+                """,
+                (seller_id, raw, norm),
+            )
 
         conn.commit()
         return seller_id
