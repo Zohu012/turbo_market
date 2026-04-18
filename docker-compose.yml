@@ -1,0 +1,130 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: turbo_market
+      POSTGRES_USER: turbo
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U turbo -d turbo_market"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://turbo:${DB_PASSWORD:-changeme}@db:5432/turbo_market
+      SYNC_DATABASE_URL: postgresql+psycopg2://turbo:${DB_PASSWORD:-changeme}@db:5432/turbo_market
+      REDIS_URL: redis://redis:6379/0
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-changeme-admin-key}
+      SCRAPER_MODE: headless
+      DELAY_SECONDS: "1.5"
+      AZN_PER_USD: "1.7"
+    volumes:
+      - browser_profile:/app/browser_profile
+    ports:
+      - "8000:8000"
+
+  celery_listing:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    command: celery -A app.scraper.celery_app worker -Q listing,default --concurrency=1 -n listing@%h --loglevel=info
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://turbo:${DB_PASSWORD:-changeme}@db:5432/turbo_market
+      SYNC_DATABASE_URL: postgresql+psycopg2://turbo:${DB_PASSWORD:-changeme}@db:5432/turbo_market
+      REDIS_URL: redis://redis:6379/0
+      SCRAPER_MODE: headless
+      DELAY_SECONDS: "1.5"
+      AZN_PER_USD: "1.7"
+    volumes:
+      - browser_profile:/app/browser_profile
+
+  celery_detail:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    command: celery -A app.scraper.celery_app worker -Q detail --concurrency=3 -n detail@%h --loglevel=info
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://turbo:${DB_PASSWORD:-changeme}@db:5432/turbo_market
+      SYNC_DATABASE_URL: postgresql+psycopg2://turbo:${DB_PASSWORD:-changeme}@db:5432/turbo_market
+      REDIS_URL: redis://redis:6379/0
+      SCRAPER_MODE: headless
+      DELAY_SECONDS: "1.5"
+      AZN_PER_USD: "1.7"
+    volumes:
+      - browser_profile:/app/browser_profile
+
+  celery_beat:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    command: celery -A app.scraper.celery_app beat --loglevel=info
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://turbo:${DB_PASSWORD:-changeme}@db:5432/turbo_market
+      SYNC_DATABASE_URL: postgresql+psycopg2://turbo:${DB_PASSWORD:-changeme}@db:5432/turbo_market
+      REDIS_URL: redis://redis:6379/0
+      FULL_SCAN_HOUR: "2"
+      FULL_SCAN_MINUTE: "0"
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend
+      - frontend
+
+volumes:
+  pg_data:
+  redis_data:
+  browser_profile:
