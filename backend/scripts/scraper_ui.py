@@ -443,7 +443,7 @@ def api_inspect(url: str):
         )
 
     from app.scraper.browser import BrowserManager
-    from app.scraper.detail_scraper import scrape_detail, _parse_seller
+    from app.scraper.detail_scraper import _parse_seller
 
     browser = BrowserManager()
     browser.start()
@@ -454,23 +454,50 @@ def api_inspect(url: str):
         except Exception as e:
             return {"error": f"page load failed: {e}"}
 
-        # Raw tel: hrefs
+        # Raw tel: hrefs — both site-wide (includes header support number)
+        # and scoped to the seller phone list (the real phones).
         try:
-            tel_hrefs = page.eval_on_selector_all(
+            tel_hrefs_all = page.eval_on_selector_all(
                 'a[href^="tel:"]',
                 "els => els.map(e => e.getAttribute('href'))",
             )
         except Exception as e:
-            tel_hrefs = [f"error: {e}"]
+            tel_hrefs_all = [f"error: {e}"]
+        try:
+            tel_hrefs_scoped_before = page.eval_on_selector_all(
+                '.product-phones__list a.product-phones__list-i[href^="tel:"]',
+                "els => els.map(e => e.getAttribute('href'))",
+            )
+        except Exception as e:
+            tel_hrefs_scoped_before = [f"error: {e}"]
 
-        # Seller container HTML (try several roots)
+        # Click the reveal button explicitly so the inspector shows the same
+        # result the real scraper will get.
+        tel_hrefs_scoped_after = tel_hrefs_scoped_before
+        try:
+            btn = page.query_selector(".product-phones__btn.js-phone-reveal-btn")
+            if btn:
+                btn.click()
+                try:
+                    page.wait_for_selector(
+                        ".product-phones__list a.product-phones__list-i",
+                        timeout=4_000,
+                    )
+                except Exception:
+                    page.wait_for_timeout(500)
+                tel_hrefs_scoped_after = page.eval_on_selector_all(
+                    '.product-phones__list a.product-phones__list-i[href^="tel:"]',
+                    "els => els.map(e => e.getAttribute('href'))",
+                )
+        except Exception as e:
+            tel_hrefs_scoped_after = [f"click error: {e}"]
+
+        # Seller container HTML (try several roots) — captured AFTER reveal click
         seller_html = None
         for sel in [
             ".product-owner",
-            ".product-owner__info",
-            ".shop-owner",
-            ".seller-info",
             ".product-phones",
+            ".product-owner__info",
         ]:
             try:
                 el = page.query_selector(sel)
@@ -483,12 +510,8 @@ def api_inspect(url: str):
             except Exception:
                 continue
 
-        # Full parsed detail
-        try:
-            full = scrape_detail(page, url)
-        except Exception as e:
-            full = {"error": str(e)}
-
+        # Parse seller using the real scraper function (this will click again —
+        # idempotent; the phones__list is already populated on this page instance)
         try:
             parsed_seller = _parse_seller(page)
         except Exception as e:
@@ -497,9 +520,10 @@ def api_inspect(url: str):
         browser.close_page(page)
         return {
             "url": url,
-            "tel_hrefs": tel_hrefs,
+            "tel_hrefs_site_wide": tel_hrefs_all,
+            "tel_hrefs_scoped_before_click": tel_hrefs_scoped_before,
+            "tel_hrefs_scoped_after_click": tel_hrefs_scoped_after,
             "parsed_seller": parsed_seller,
-            "parsed_city": full.get("city") if isinstance(full, dict) else None,
             "seller_container": seller_html,
         }
     finally:

@@ -139,9 +139,9 @@ def _parse_seller(page: Page) -> dict:
     """
     seller: dict = {}
 
-    # ── Try the chat-button data first (no click needed) ────────────────────
+    # ── turbo_seller_id + name from chat-link metadata (no click needed) ────
     turbo_user_id = None
-    phones_raw: list[str] = []
+    dr_phones: list[str] = []
     try:
         chat_el = page.query_selector("#chat-write-link")
         if chat_el:
@@ -156,7 +156,7 @@ def _parse_seller(page: Page) -> dict:
                         if not turbo_user_id and payload.get("id"):
                             turbo_user_id = str(payload["id"])
                         if isinstance(payload.get("phones"), list):
-                            phones_raw = [p for p in payload["phones"] if p]
+                            dr_phones = [p for p in payload["phones"] if p]
                         if not seller.get("name") and payload.get("name"):
                             seller["name"] = payload["name"]
                 except Exception:
@@ -167,39 +167,48 @@ def _parse_seller(page: Page) -> dict:
     if turbo_user_id:
         seller["turbo_seller_id"] = turbo_user_id
 
-    # ── Phones: reveal button click fallback (for tel: hrefs) ───────────────
-    tel_hrefs: list[str] = []
-    try:
-        tel_hrefs = page.eval_on_selector_all(
-            'a.product-phones__list-i[href^="tel:"], a[href^="tel:"]',
-            "els => Array.from(new Set(els.map(e => (e.getAttribute('href') || '').replace(/^tel:/, '').trim()).filter(Boolean)))",
-        )
-    except Exception:
-        tel_hrefs = []
+    # ── Phones: MUST come from .product-phones__list (never page-wide, to
+    #    avoid picking up the site-wide support number in the header). The
+    #    list is populated only after clicking the reveal button on unauthed
+    #    sessions. ───────────────────────────────────────────────────────────
+    PHONE_SELECTOR = ".product-phones__list a.product-phones__list-i"
 
-    if not tel_hrefs:
+    def _read_list_phones() -> list[str]:
         try:
-            btn = page.query_selector(".product-phones__btn.js-phone-reveal-btn")
+            return page.eval_on_selector_all(
+                PHONE_SELECTOR,
+                "els => Array.from(new Set(els.map(e => (e.getAttribute('href') || '').replace(/^tel:\\s*/i, '').trim()).filter(Boolean)))",
+            )
+        except Exception:
+            return []
+
+    phones_raw = _read_list_phones()
+
+    if not phones_raw:
+        # Click the reveal button; then wait for the list to render
+        try:
+            btn = page.query_selector(
+                ".product-phones__btn.js-phone-reveal-btn, "
+                ".product-phones .js-phone-reveal-btn"
+            )
             if btn:
-                btn.click()
-                # Wait up to 3s for the list to render
                 try:
-                    page.wait_for_selector(
-                        ".product-phones__list a.product-phones__list-i",
-                        timeout=3_000,
-                    )
+                    btn.scroll_into_view_if_needed(timeout=1_500)
+                except Exception:
+                    pass
+                btn.click()
+                try:
+                    page.wait_for_selector(PHONE_SELECTOR, timeout=4_000)
                 except Exception:
                     page.wait_for_timeout(500)
-                tel_hrefs = page.eval_on_selector_all(
-                    'a.product-phones__list-i[href^="tel:"], a[href^="tel:"]',
-                    "els => Array.from(new Set(els.map(e => (e.getAttribute('href') || '').replace(/^tel:/, '').trim()).filter(Boolean)))",
-                )
+                phones_raw = _read_list_phones()
         except Exception:
             pass
 
-    # Prefer tel: hrefs (already in +994… form); fall back to data-receiver phones
-    if tel_hrefs:
-        phones_raw = tel_hrefs
+    # Fallback: data-receiver (only when logged in — usually empty for unauthed)
+    if not phones_raw and dr_phones:
+        phones_raw = dr_phones
+
     seller["phones"] = phones_raw
     seller["phones_normalized"] = [
         p for p in (normalize_phone(x) for x in phones_raw) if p
