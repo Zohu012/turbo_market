@@ -5,6 +5,17 @@ Run from the backend/ directory:
     python scripts/run_local.py
     python scripts/run_local.py --make Toyota     # single make
     python scripts/run_local.py --headless        # headless mode (for cron)
+    python scripts/run_local.py --fresh           # ignore checkpoint, start from first make
+    python scripts/run_local.py --details-only    # skip Phase 1, only fetch missing details
+    python scripts/run_local.py --skip-details    # only Phase 1 (listings), no detail pages
+    python scripts/run_local.py --skip-lifecycle  # no sold/removed deactivation
+
+Checkpoint/resume:
+    Phase 1: saves last completed make to scraper_checkpoint.txt; next run skips done makes.
+             Cleared when Phase 1 finishes cleanly. --fresh ignores it.
+    Phase 2: queries DB for active vehicles with raw_detail_json IS NULL — automatically
+             resumes after crash since finished vehicles have the column populated.
+             Completion = zero rows match that query.
 
 Set environment via backend/.env:
     SYNC_DATABASE_URL=postgresql://turbo:PASS@host.db.ondigitalocean.com:25060/turbo_market?sslmode=require
@@ -39,7 +50,48 @@ from app.scraper.pipeline import get_sync_conn, upsert_listing, update_vehicle_d
 from app.scraper.lifecycle import run_lifecycle_check_sync
 
 
-def run(target_make: str = None):
+CHECKPOINT_FILE = Path(__file__).parent.parent / "scraper_checkpoint.txt"
+
+
+def load_checkpoint() -> str | None:
+    if CHECKPOINT_FILE.exists():
+        name = CHECKPOINT_FILE.read_text(encoding="utf-8").strip()
+        return name or None
+    return None
+
+
+def save_checkpoint(make_name: str) -> None:
+    CHECKPOINT_FILE.write_text(make_name, encoding="utf-8")
+
+
+def clear_checkpoint() -> None:
+    if CHECKPOINT_FILE.exists():
+        CHECKPOINT_FILE.unlink()
+
+
+def fetch_pending_details(conn, target_make: str = None) -> list[tuple[int, str]]:
+    """Vehicles that still need Phase 2 (detail page) — auto-resumable via DB state."""
+    sql = (
+        "SELECT id, url FROM vehicles "
+        "WHERE status = 'active' AND raw_detail_json IS NULL"
+    )
+    params: tuple = ()
+    if target_make:
+        sql += " AND LOWER(make) = LOWER(%s)"
+        params = (target_make,)
+    sql += " ORDER BY id"
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return [(row[0], row[1]) for row in cur.fetchall()]
+
+
+def run(
+    target_make: str = None,
+    fresh: bool = False,
+    details_only: bool = False,
+    skip_details: bool = False,
+    skip_lifecycle: bool = False,
+):
     log.info("=== turbo_market local scraper starting ===")
     browser = BrowserManager()
     browser.start()
@@ -47,57 +99,102 @@ def run(target_make: str = None):
 
     try:
         page = browser.get_page()
-        all_makes = get_all_makes(page)
-
-        if target_make:
-            makes = [m for m in all_makes if m["name"].lower() == target_make.lower()]
-            if not makes:
-                log.error(
-                    f"Make '{target_make}' not found. "
-                    f"Available (first 10): {[m['name'] for m in all_makes[:10]]}..."
-                )
-                return
-        else:
-            makes = all_makes
-
-        log.info(f"Scanning {len(makes)} make(s)")
-
         live_ids: set[int] = set()
-        new_vehicles: list[tuple[int, str]] = []  # (vehicle_id, url)
 
-        # Phase 1: listing scan
-        for make in makes:
-            log.info(f"[make] {make['name']}")
-            try:
-                vehicles = scrape_make_pages(page, make)
-                for v in vehicles:
-                    live_ids.add(v["turbo_id"])
-                    vehicle_id, action, _ = upsert_listing(conn, v)
-                    if action == "new":
-                        new_vehicles.append((vehicle_id, v["url"]))
-                log.info(f"  {make['name']}: {len(vehicles)} found")
-            except Exception as e:
-                log.error(f"  {make['name']} failed: {e}")
-                continue
+        # ── Phase 1: listing scan ────────────────────────────────────────────
+        if not details_only:
+            all_makes = get_all_makes(page)
 
-        # Phase 2: detail pages for new vehicles
-        log.info(f"Fetching details for {len(new_vehicles)} new vehicles...")
-        for i, (vehicle_id, url) in enumerate(new_vehicles, 1):
-            if i % 50 == 0:
-                log.info(f"  Details: {i}/{len(new_vehicles)}")
-            detail_page = browser.new_page()
-            try:
-                detail = scrape_detail(detail_page, url)
-                if detail:
-                    update_vehicle_detail(conn, vehicle_id, detail)
-            except Exception as e:
-                log.warning(f"  Detail fetch failed for {url}: {e}")
-            finally:
-                browser.close_page(detail_page)
+            if target_make:
+                makes = [
+                    m for m in all_makes if m["name"].lower() == target_make.lower()
+                ]
+                if not makes:
+                    log.error(
+                        f"Make '{target_make}' not found. "
+                        f"Available (first 10): {[m['name'] for m in all_makes[:10]]}..."
+                    )
+                    return
+            else:
+                makes = all_makes
+                if fresh:
+                    clear_checkpoint()
+                else:
+                    last = load_checkpoint()
+                    if last:
+                        idx = next(
+                            (i for i, m in enumerate(makes) if m["name"] == last),
+                            -1,
+                        )
+                        if idx >= 0:
+                            skipped = idx + 1
+                            makes = makes[skipped:]
+                            log.info(
+                                f"Resuming after last completed make '{last}' — "
+                                f"skipping {skipped} already-done, {len(makes)} remaining"
+                            )
+                        else:
+                            log.warning(
+                                f"Checkpoint make '{last}' not in current list — ignoring"
+                            )
 
-        # Phase 3: lifecycle check (only on full scan, not single-make)
-        if not target_make:
-            log.info(f"Running lifecycle check on {len(live_ids)} live IDs...")
+            log.info(f"Phase 1: scanning {len(makes)} make(s)")
+
+            for make in makes:
+                log.info(f"[make] {make['name']}")
+                try:
+                    vehicles = scrape_make_pages(page, make)
+                    for v in vehicles:
+                        live_ids.add(v["turbo_id"])
+                        upsert_listing(conn, v)
+                    log.info(f"  {make['name']}: {len(vehicles)} found")
+                except Exception as e:
+                    log.error(f"  {make['name']} failed: {e}")
+                    continue
+                finally:
+                    if not target_make:
+                        save_checkpoint(make["name"])
+
+            if not target_make:
+                clear_checkpoint()
+        else:
+            log.info("Phase 1 skipped (--details-only)")
+
+        # ── Phase 2: detail pages (driven by DB state — auto-resumable) ──────
+        if skip_details:
+            log.info("Phase 2 skipped (--skip-details)")
+        else:
+            pending = fetch_pending_details(conn, target_make)
+            log.info(f"Phase 2: {len(pending)} vehicles pending details")
+            for i, (vehicle_id, url) in enumerate(pending, 1):
+                if i % 50 == 0 or i == len(pending):
+                    log.info(f"  Details: {i}/{len(pending)}")
+                detail_page = browser.new_page()
+                try:
+                    detail = scrape_detail(detail_page, url)
+                    if detail:
+                        update_vehicle_detail(conn, vehicle_id, detail)
+                except Exception as e:
+                    log.warning(f"  Detail fetch failed for {url}: {e}")
+                finally:
+                    browser.close_page(detail_page)
+
+            # Completion check — how many still un-detailed after the run?
+            remaining = fetch_pending_details(conn, target_make)
+            if remaining:
+                log.warning(
+                    f"Phase 2 done — {len(remaining)} vehicles still missing details "
+                    f"(likely detail-page failures; re-run to retry)"
+                )
+            else:
+                log.info("Phase 2 done — all active vehicles have detail data")
+
+        # ── Phase 3: lifecycle check (only on full scan) ─────────────────────
+        if target_make or details_only or skip_lifecycle:
+            if skip_lifecycle:
+                log.info("Phase 3 skipped (--skip-lifecycle)")
+        else:
+            log.info(f"Phase 3: lifecycle check on {len(live_ids)} live IDs...")
             deactivated = run_lifecycle_check_sync(conn, live_ids)
             log.info(f"Deactivated {deactivated} sold/removed vehicles")
 
@@ -116,9 +213,35 @@ if __name__ == "__main__":
         action="store_true",
         help="Force headless mode — overrides SCRAPER_MODE in .env (use for cron)",
     )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Ignore checkpoint and start from the first make",
+    )
+    parser.add_argument(
+        "--details-only",
+        action="store_true",
+        help="Skip Phase 1 (listings) — only fetch missing detail pages",
+    )
+    parser.add_argument(
+        "--skip-details",
+        action="store_true",
+        help="Skip Phase 2 (detail pages) — listings only",
+    )
+    parser.add_argument(
+        "--skip-lifecycle",
+        action="store_true",
+        help="Skip Phase 3 (sold/removed deactivation)",
+    )
     args = parser.parse_args()
 
     if args.headless:
         os.environ["SCRAPER_MODE"] = "headless"
 
-    run(target_make=args.make)
+    run(
+        target_make=args.make,
+        fresh=args.fresh,
+        details_only=args.details_only,
+        skip_details=args.skip_details,
+        skip_lifecycle=args.skip_lifecycle,
+    )
