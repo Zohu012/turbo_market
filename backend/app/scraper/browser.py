@@ -38,9 +38,18 @@ class BrowserManager:
         else:
             # Headless with persistent profile for Cloudflare trust accumulation
             BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+            proxy = None
+            if settings.proxy_server:
+                proxy = {
+                    "server": settings.proxy_server,
+                    "username": settings.proxy_username,
+                    "password": settings.proxy_password,
+                }
+                log.info(f"Launching browser with proxy {settings.proxy_server}")
             self._context = self._playwright.chromium.launch_persistent_context(
                 str(BROWSER_PROFILE_DIR),
                 headless=True,
+                proxy=proxy,
                 args=[
                     "--no-sandbox",
                     "--disable-setuid-sandbox",

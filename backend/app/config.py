@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     delay_seconds: float = 1.5
     max_pages: int = 0
 
+    # Proxy (Webshare Static Residential) — leave blank to disable
+    proxy_server: str = ""
+    proxy_username: str = ""
+    proxy_password: str = ""
+
     azn_per_usd: float = 1.7
 
     full_scan_hour: int = 2

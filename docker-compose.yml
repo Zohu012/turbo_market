@@ -69,6 +69,9 @@ services:
       SCRAPER_MODE: headless
       DELAY_SECONDS: "1.5"
       AZN_PER_USD: "1.7"
+      PROXY_SERVER: ${PROXY_SERVER:-}
+      PROXY_USERNAME: ${PROXY_USERNAME:-}
+      PROXY_PASSWORD: ${PROXY_PASSWORD:-}
     volumes:
       - browser_profile:/app/browser_profile
 
@@ -89,6 +92,9 @@ services:
       SCRAPER_MODE: headless
       DELAY_SECONDS: "1.5"
       AZN_PER_USD: "1.7"
+      PROXY_SERVER: ${PROXY_SERVER:-}
+      PROXY_USERNAME: ${PROXY_USERNAME:-}
+      PROXY_PASSWORD: ${PROXY_PASSWORD:-}
     volumes:
       - browser_profile:/app/browser_profile
 
