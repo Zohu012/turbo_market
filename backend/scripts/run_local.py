@@ -67,7 +67,7 @@ def run(target_make: str = None):
 
         # Phase 1: listing scan
         for make in makes:
-            log.info(f"→ {make['name']}")
+            log.info(f"[make] {make['name']}")
             try:
                 vehicles = scrape_make_pages(page, make)
                 for v in vehicles:
