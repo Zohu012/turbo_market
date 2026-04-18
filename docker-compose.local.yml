@@ -1,0 +1,45 @@
+# Local scraper stack — runs on your Windows machine with residential IP.
+# Connects to Postgres + Redis on the droplet via SSH tunnel.
+#
+# STEP 1: Open SSH tunnel (keep this PowerShell window open):
+#   ssh -L 5432:localhost:5432 -L 6379:localhost:6379 root@164.90.185.60 -N
+#
+# STEP 2: Start workers (separate PowerShell window):
+#   docker compose -f docker-compose.local.yml --env-file .env.local up --build
+#
+# On-demand scans: trigger from https://www.import-car.net/admin
+# Daily scan: celery_beat on the droplet schedules it; local workers pick it up.
+
+services:
+  celery_listing:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    command: celery -A app.scraper.celery_app worker -Q listing,default --concurrency=1 -n listing@%h --loglevel=info
+    environment:
+      DATABASE_URL: postgresql+asyncpg://turbo:${DB_PASSWORD}@host.docker.internal:5432/turbo_market
+      SYNC_DATABASE_URL: postgresql+psycopg2://turbo:${DB_PASSWORD}@host.docker.internal:5432/turbo_market
+      REDIS_URL: redis://host.docker.internal:6379/0
+      SCRAPER_MODE: headless
+      DELAY_SECONDS: "1.5"
+      AZN_PER_USD: "${AZN_PER_USD:-1.7}"
+    volumes:
+      - browser_profile:/app/browser_profile
+
+  celery_detail:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    command: celery -A app.scraper.celery_app worker -Q detail --concurrency=3 -n detail@%h --loglevel=info
+    environment:
+      DATABASE_URL: postgresql+asyncpg://turbo:${DB_PASSWORD}@host.docker.internal:5432/turbo_market
+      SYNC_DATABASE_URL: postgresql+psycopg2://turbo:${DB_PASSWORD}@host.docker.internal:5432/turbo_market
+      REDIS_URL: redis://host.docker.internal:6379/0
+      SCRAPER_MODE: headless
+      DELAY_SECONDS: "1.5"
+      AZN_PER_USD: "${AZN_PER_USD:-1.7}"
+    volumes:
+      - browser_profile:/app/browser_profile
+
+volumes:
+  browser_profile:
