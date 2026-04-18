@@ -6,7 +6,6 @@ Worker setup:
   Detail queue:   celery -A app.scraper.celery_app worker -Q detail --concurrency=3
   Beat scheduler: celery -A app.scraper.celery_app beat
 """
-import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -18,6 +17,7 @@ from app.scraper.browser import BrowserManager
 from app.scraper.listing_scraper import get_all_makes, scrape_make_pages
 from app.scraper.detail_scraper import scrape_detail
 from app.scraper.pipeline import get_sync_conn, upsert_listing, update_vehicle_detail
+from app.scraper.lifecycle import run_lifecycle_check_sync
 from app.config import settings
 
 log = logging.getLogger(__name__)
@@ -149,16 +149,8 @@ def lifecycle_check_task(self, results: list[dict], job_id: Optional[int] = None
             total_new += r.get("new", 0)
             total_updated += r.get("updated", 0)
 
-    # Run lifecycle check synchronously using asyncio
-    async def _run():
-        from app.database import AsyncSessionLocal
-        from app.scraper.lifecycle import run_lifecycle_check
-        async with AsyncSessionLocal() as db:
-            return await run_lifecycle_check(db, live_ids)
-
-    deactivated = asyncio.run(_run())
-
     conn = get_sync_conn()
+    deactivated = run_lifecycle_check_sync(conn, live_ids)
     try:
         _update_job_status(
             conn,

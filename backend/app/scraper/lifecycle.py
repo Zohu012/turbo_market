@@ -3,17 +3,20 @@ Lifecycle check — bulk-deactivates vehicles no longer live on turbo.az.
 
 After a listing scan collects all live turbo_ids, this module compares against
 the DB and marks any missing active vehicles as 'inactive'.
+
+Uses psycopg2 (sync) to stay consistent with the rest of the Celery pipeline
+and avoid asyncio.run() conflicts inside Celery chord callbacks.
 """
 import logging
+from collections import Counter
 from datetime import datetime, timezone
 
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from psycopg2.extensions import connection as PGConnection
 
 log = logging.getLogger(__name__)
 
 
-async def run_lifecycle_check(db: AsyncSession, live_ids: set[int]) -> int:
+def run_lifecycle_check_sync(conn: PGConnection, live_ids: set[int]) -> int:
     """
     Mark active vehicles not in live_ids as inactive.
     Returns count of deactivated vehicles.
@@ -24,45 +27,48 @@ async def run_lifecycle_check(db: AsyncSession, live_ids: set[int]) -> int:
 
     now = datetime.now(timezone.utc)
 
-    # Create temp table and bulk insert live IDs
-    await db.execute(text("CREATE TEMP TABLE _live_ids (turbo_id INTEGER PRIMARY KEY) ON COMMIT DROP"))
-    # Insert in chunks to avoid parameter limits
-    chunk_size = 10_000
-    ids_list = list(live_ids)
-    for i in range(0, len(ids_list), chunk_size):
-        chunk = ids_list[i:i + chunk_size]
-        values = ", ".join(f"({tid})" for tid in chunk)
-        await db.execute(text(f"INSERT INTO _live_ids (turbo_id) VALUES {values} ON CONFLICT DO NOTHING"))
+    with conn.cursor() as cur:
+        cur.execute(
+            "CREATE TEMP TABLE _live_ids (turbo_id INTEGER PRIMARY KEY) ON COMMIT DROP"
+        )
 
-    result = await db.execute(
-        text("""
+        # Bulk insert in chunks to avoid parameter limits
+        ids_list = list(live_ids)
+        for i in range(0, len(ids_list), 10_000):
+            chunk = ids_list[i : i + 10_000]
+            values = ", ".join(f"({tid})" for tid in chunk)
+            cur.execute(
+                f"INSERT INTO _live_ids (turbo_id) VALUES {values} ON CONFLICT DO NOTHING"
+            )
+
+        cur.execute(
+            """
             UPDATE vehicles
             SET status = 'inactive',
-                date_deactivated = :now,
-                date_updated = :now
+                date_deactivated = %s,
+                date_updated = %s
             WHERE status = 'active'
               AND NOT EXISTS (
                   SELECT 1 FROM _live_ids l WHERE l.turbo_id = vehicles.turbo_id
               )
-            RETURNING id, turbo_id, seller_id
-        """),
-        {"now": now},
-    )
-    deactivated = result.fetchall()
+            RETURNING id, seller_id
+            """,
+            (now, now),
+        )
+        deactivated = cur.fetchall()
+
     count = len(deactivated)
 
     if count > 0:
-        # Update seller total_sold counters
-        seller_ids = [row.seller_id for row in deactivated if row.seller_id]
+        seller_ids = [row[1] for row in deactivated if row[1]]
         if seller_ids:
-            from sqlalchemy import func
-            for sid in set(seller_ids):
-                sold_count = seller_ids.count(sid)
-                await db.execute(
-                    text("UPDATE sellers SET total_sold = total_sold + :n WHERE id = :sid"),
-                    {"n": sold_count, "sid": sid},
-                )
+            with conn.cursor() as cur:
+                for sid, sold_count in Counter(seller_ids).items():
+                    cur.execute(
+                        "UPDATE sellers SET total_sold = total_sold + %s WHERE id = %s",
+                        (sold_count, sid),
+                    )
 
-    await db.commit()
+    conn.commit()
     log.info(f"Lifecycle check: deactivated {count} vehicles")
     return count
