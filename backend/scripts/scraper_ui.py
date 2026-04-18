@@ -97,6 +97,10 @@ HTML = """<!DOCTYPE html>
         <button id="btn-listings" class="secondary">Listings only</button>
       </div>
       <div class="row" style="margin-top: 14px;">
+        <button id="btn-reset-details" class="secondary" title="Clears raw_detail_json for selected make (or all if none selected) so Phase 2 will re-fetch them">Reset details (force re-scrape)</button>
+        <button id="btn-reset-sellerless" class="secondary" title="Only clears vehicles where seller_id IS NULL (minimal re-work)">Reset only sellerless</button>
+      </div>
+      <div class="row" style="margin-top: 14px;">
         <button id="btn-stop" class="danger" disabled>Stop</button>
       </div>
     </div>
@@ -229,6 +233,25 @@ $('btn-listings').onclick = () => start({ mode: 'listings' });
 $('btn-stop').onclick = async () => {
   if (!confirm('Stop scraper?')) return;
   await api('/api/stop', 'POST');
+  refreshStatus();
+};
+
+$('btn-reset-details').onclick = async () => {
+  const m = $('make-select').value;
+  const label = m ? `make "${m}"` : 'ALL makes';
+  if (!confirm(`Clear raw_detail_json for ${label}? Next "Details only" run will re-fetch every active vehicle.`)) return;
+  const r = await api('/api/reset-details?' + new URLSearchParams(m ? { make: m } : {}), 'POST');
+  alert(r.error ? 'Error: ' + r.error : `Reset ${r.updated} rows — now click "Details only"`);
+  refreshStatus();
+};
+$('btn-reset-sellerless').onclick = async () => {
+  const m = $('make-select').value;
+  const label = m ? `make "${m}"` : 'ALL makes';
+  if (!confirm(`Clear raw_detail_json for vehicles in ${label} where seller_id IS NULL?`)) return;
+  const params = { sellerless: '1' };
+  if (m) params.make = m;
+  const r = await api('/api/reset-details?' + new URLSearchParams(params), 'POST');
+  alert(r.error ? 'Error: ' + r.error : `Reset ${r.updated} sellerless rows — now click "Details only"`);
   refreshStatus();
 };
 
@@ -369,6 +392,37 @@ def api_start(
         stderr=subprocess.DEVNULL,
     )
     return {"started": True, "pid": _proc.pid, "args": args[1:]}
+
+
+@app.post("/api/reset-details")
+def api_reset_details(
+    make: str | None = Query(None),
+    sellerless: bool = Query(False),
+):
+    """
+    Clear raw_detail_json on active vehicles so Phase 2 will re-fetch them.
+    Optional filters: make (case-insensitive), sellerless (seller_id IS NULL).
+    """
+    global _proc
+    if _proc is not None and _proc.poll() is None:
+        return JSONResponse(
+            {"error": "stop the scraper first"}, status_code=400
+        )
+
+    sql = "UPDATE vehicles SET raw_detail_json = NULL WHERE status = 'active'"
+    params: list = []
+    if make:
+        sql += " AND LOWER(make) = LOWER(%s)"
+        params.append(make)
+    if sellerless:
+        sql += " AND seller_id IS NULL"
+    try:
+        with get_sync_conn() as conn, conn.cursor() as cur:
+            cur.execute(sql, tuple(params))
+            conn.commit()
+            return {"updated": cur.rowcount}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.get("/api/inspect")
