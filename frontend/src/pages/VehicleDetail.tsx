@@ -20,19 +20,21 @@ export default function VehicleDetail() {
   if (loading) return <div className="p-8 text-center text-gray-400">Loading...</div>;
   if (!vehicle) return <div className="p-8 text-center text-red-400">Vehicle not found</div>;
 
-  const specs = [
+  const extra = vehicle as unknown as Record<string, unknown>;
+  const specs: Array<[string, unknown]> = [
     ["Year", vehicle.year],
     ["Color", vehicle.color],
     ["Engine", vehicle.engine],
     ["Fuel", vehicle.fuel_type],
     ["Transmission", vehicle.transmission],
     ["Body", vehicle.body_type],
-    ["Drive", (vehicle as unknown as Record<string, unknown>).drive_type],
-    ["Doors", (vehicle as unknown as Record<string, unknown>).doors],
+    ["Drive", extra.drive_type],
+    ["Doors", extra.doors],
     ["Odometer", vehicle.odometer ? `${vehicle.odometer.toLocaleString()} ${vehicle.odometer_type ?? ""}` : null],
-    ["VIN", (vehicle as unknown as Record<string, unknown>).vin],
+    ["VIN", extra.vin],
     ["City", vehicle.city],
-  ].filter(([, v]) => v != null);
+  ];
+  const visibleSpecs = specs.filter(([, v]) => v != null);
 
   const priceHistory = vehicle.price_history ?? [];
 
@@ -88,8 +90,8 @@ export default function VehicleDetail() {
           </div>
 
           <div className="grid grid-cols-2 gap-2">
-            {specs.map(([label, value]) => (
-              <div key={String(label)} className="bg-gray-50 rounded p-2">
+            {visibleSpecs.map(([label, value]) => (
+              <div key={label} className="bg-gray-50 rounded p-2">
                 <p className="text-xs text-gray-500">{label}</p>
                 <p className="text-sm font-medium">{String(value)}</p>
               </div>
@@ -124,7 +126,7 @@ export default function VehicleDetail() {
       </div>
 
       {/* Seller */}
-      {vehicle.seller && (
+      {vehicle.seller ? (
         <div className="bg-white rounded-lg border p-4">
           <h2 className="font-semibold mb-2">Seller</h2>
           <div className="flex items-center justify-between">
@@ -140,17 +142,17 @@ export default function VehicleDetail() {
             </Link>
           </div>
         </div>
-      )}
+      ) : null}
 
       {/* Description */}
-      {(vehicle as unknown as Record<string, unknown>).description && (
+      {extra.description ? (
         <div className="bg-white rounded-lg border p-4">
           <h2 className="font-semibold mb-2">Description</h2>
           <p className="text-sm text-gray-600 whitespace-pre-line">
-            {(vehicle as unknown as Record<string, unknown>).description as string}
+            {String(extra.description)}
           </p>
         </div>
-      )}
+      ) : null}
 
       {/* Price history */}
       {priceHistory.length > 0 && (
