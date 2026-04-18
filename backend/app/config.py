@@ -9,6 +9,11 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     admin_api_key: str = "changeme-admin-key"
 
+    # Auth
+    app_username: str = "admin"
+    app_password: str = "changeme"
+    secret_key: str = "changeme-secret-key-please-set-in-env"
+
     scraper_mode: str = "headless"
     cdp_url: str = "http://localhost:9222"
     delay_seconds: float = 1.5

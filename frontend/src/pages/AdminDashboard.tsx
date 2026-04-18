@@ -3,7 +3,6 @@ import { adminApi, type ScrapeJob, type PagedResponse } from "../api/client";
 import JobStatusBadge from "../components/JobStatusBadge";
 
 export default function AdminDashboard() {
-  const [key, setKey] = useState(() => localStorage.getItem("admin_key") ?? "");
   const [jobs, setJobs] = useState<PagedResponse<ScrapeJob> | null>(null);
   const [stats, setStats] = useState<Record<string, unknown> | null>(null);
   const [triggerMake, setTriggerMake] = useState("");
@@ -11,11 +10,6 @@ export default function AdminDashboard() {
   const [jobType, setJobType] = useState("make_scan");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
-
-  const saveKey = () => {
-    localStorage.setItem("admin_key", key);
-    loadData();
-  };
 
   const loadData = async () => {
     try {
@@ -27,13 +21,13 @@ export default function AdminDashboard() {
       setStats(statsRes.data as Record<string, unknown>);
       setError("");
     } catch {
-      setError("Auth failed — check your admin key");
+      setError("Failed to load data");
     }
   };
 
   useEffect(() => {
-    if (key) loadData();
-  }, []); // eslint-disable-line
+    loadData();
+  }, []);
 
   const trigger = async () => {
     setSubmitting(true);
@@ -54,23 +48,6 @@ export default function AdminDashboard() {
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">Admin Dashboard</h1>
-
-      {/* API Key */}
-      <div className="bg-white rounded-lg border p-4 flex gap-3 items-end">
-        <div className="flex-1">
-          <label className="text-xs text-gray-500 uppercase block mb-1">Admin API Key</label>
-          <input
-            type="password"
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-            placeholder="Enter admin key"
-            className="border rounded px-3 py-1.5 text-sm w-full"
-          />
-        </div>
-        <button onClick={saveKey} className="px-4 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">
-          Save & Refresh
-        </button>
-      </div>
 
       {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded text-sm">{error}</div>}
 

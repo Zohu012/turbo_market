@@ -1,11 +1,10 @@
 import math
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.database import get_db
 from app.crud.scrape_job import get_jobs, get_job, create_job
 from app.schemas.scrape_job import ScrapeJobOut, ScrapeJobListResponse, TriggerRequest
@@ -13,15 +12,9 @@ from app.schemas.scrape_job import ScrapeJobOut, ScrapeJobListResponse, TriggerR
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
-def verify_admin(x_admin_key: str = Header(...)):
-    if x_admin_key != settings.admin_api_key:
-        raise HTTPException(status_code=403, detail="Invalid admin key")
-
-
 @router.post("/scrape/trigger", response_model=ScrapeJobOut)
 async def trigger_scrape(
     body: TriggerRequest,
-    _: None = Depends(verify_admin),
     db: AsyncSession = Depends(get_db),
 ):
     from app.scraper.tasks import on_demand_scan, daily_full_scan, lifecycle_check_task
@@ -57,7 +50,6 @@ async def list_jobs(
     status: Optional[str] = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=100),
-    _: None = Depends(verify_admin),
     db: AsyncSession = Depends(get_db),
 ):
     jobs, total = await get_jobs(db, page=page, page_size=page_size, status=status)
@@ -70,7 +62,6 @@ async def list_jobs(
 @router.get("/scrape/jobs/{job_id}", response_model=ScrapeJobOut)
 async def get_job_detail(
     job_id: int,
-    _: None = Depends(verify_admin),
     db: AsyncSession = Depends(get_db),
 ):
     job = await get_job(db, job_id)
@@ -81,7 +72,6 @@ async def get_job_detail(
 
 @router.get("/stats")
 async def get_stats(
-    _: None = Depends(verify_admin),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(text("""

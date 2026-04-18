@@ -5,12 +5,24 @@ const api = axios.create({
   headers: { "Content-Type": "application/json" },
 });
 
-// Inject admin key from localStorage if present
+// Attach JWT token to every request
 api.interceptors.request.use((config) => {
-  const key = localStorage.getItem("admin_key");
-  if (key) config.headers["X-Admin-Key"] = key;
+  const token = localStorage.getItem("token");
+  if (token) config.headers["Authorization"] = `Bearer ${token}`;
   return config;
 });
+
+// On 401, clear token and redirect to login
+api.interceptors.response.use(
+  (r) => r,
+  (err) => {
+    if (err.response?.status === 401) {
+      localStorage.removeItem("token");
+      window.location.href = "/login";
+    }
+    return Promise.reject(err);
+  }
+);
 
 export default api;
 

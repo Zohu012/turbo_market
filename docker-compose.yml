@@ -41,6 +41,9 @@ services:
       SYNC_DATABASE_URL: postgresql+psycopg2://turbo:${DB_PASSWORD:-changeme}@db:5432/turbo_market
       REDIS_URL: redis://redis:6379/0
       ADMIN_API_KEY: ${ADMIN_API_KEY:-changeme-admin-key}
+      APP_USERNAME: ${APP_USERNAME:-admin}
+      APP_PASSWORD: ${APP_PASSWORD:-changeme}
+      SECRET_KEY: ${SECRET_KEY:-changeme-secret-key-please-set-in-env}
       SCRAPER_MODE: headless
       DELAY_SECONDS: "1.5"
       AZN_PER_USD: "1.7"
