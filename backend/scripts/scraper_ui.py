@@ -117,20 +117,22 @@ HTML = """<!DOCTYPE html>
   </div>
 
   <div class="card" style="margin-top: 16px;">
-    <h2>Inspect detail page <span style="color:#8b94a3; font-weight:400; text-transform:none; letter-spacing:0; font-size:11px;">(scraper must be stopped)</span></h2>
-    <div class="row">
-      <input type="text" id="inspect-url" placeholder="https://turbo.az/autos/12345678-..." style="flex:1; min-width:280px;" />
-      <button id="btn-inspect" class="secondary">Inspect</button>
-    </div>
-    <pre class="log" id="inspect-out" style="height: 260px;">Paste a turbo.az detail URL and click Inspect to see tel: links, parsed seller, and seller-container HTML.</pre>
-  </div>
-
-  <div class="card" style="margin-top: 16px;">
     <h2>Live log <span style="color:#8b94a3; font-weight:400; text-transform:none; letter-spacing:0; font-size:11px;">(scraper_local.log)</span>
       <label style="float:right;"><input type="checkbox" id="filter-input" checked> filter</label>
       <input type="text" id="filter-text" placeholder="filter (regex)" style="float:right; margin-right:8px; width:180px;" />
     </h2>
     <pre class="log" id="log">Waiting for output…</pre>
+  </div>
+
+  <div class="card" style="margin-top: 16px;">
+    <h2>Inspect detail page <span style="color:#8b94a3; font-weight:400; text-transform:none; letter-spacing:0; font-size:11px;">(scraper must be stopped — also upserts the vehicle into DB)</span></h2>
+    <div class="row">
+      <input type="text" id="inspect-url" placeholder="https://turbo.az/autos/12345678-..." style="flex:1; min-width:280px;" />
+      <button id="btn-inspect" class="secondary">Inspect &amp; save</button>
+    </div>
+    <pre class="log" id="inspect-out" style="height: 260px;">Paste a turbo.az detail URL and click &quot;Inspect &amp; save&quot;.
+The page will be scraped, the vehicle inserted (if new) or updated in the DB,
+and the parsed seller + tel: links will be shown for verification.</pre>
   </div>
 </div>
 
@@ -425,14 +427,79 @@ def api_reset_details(
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+def _extract_listing_fields_from_detail(page, url: str) -> dict | None:
+    """
+    Pull listing-card-equivalent fields from a detail page so we can
+    upsert_listing when the vehicle isn't already in DB.
+
+    Returns None if turbo_id can't be extracted (required field).
+    """
+    import re
+    from app.scraper.listing_scraper import parse_price, to_price_azn
+
+    m = re.search(r"/autos/(\d+)", url)
+    if not m:
+        return None
+    turbo_id = int(m.group(1))
+
+    # Make/model from URL slug (e.g. /autos/10313931-bmw-520 → BMW, 520)
+    slug_m = re.search(r"/autos/\d+-([^/?#]+)", url)
+    make = model = None
+    if slug_m:
+        parts = slug_m.group(1).split("-", 1)
+        if parts:
+            make = parts[0].replace("_", " ").title()
+        if len(parts) > 1:
+            model = parts[1].replace("-", " ").replace("_", " ")
+
+    # Try h1 / breadcrumbs for a better make/model + year
+    year = None
+    try:
+        h1_el = page.query_selector(
+            "h1.product-title, .product-title, h1"
+        )
+        if h1_el:
+            title_text = (h1_el.inner_text() or "").strip()
+            ym = re.search(r"\b(19|20)\d{2}\b", title_text)
+            if ym:
+                year = int(ym.group(0))
+    except Exception:
+        pass
+
+    # Price
+    price = None
+    currency = None
+    try:
+        price_el = page.query_selector(
+            ".product-price__price, .product-price, .price"
+        )
+        if price_el:
+            price, currency = parse_price(price_el.inner_text() or "")
+    except Exception:
+        pass
+
+    return {
+        "turbo_id": turbo_id,
+        "make": make or "Unknown",
+        "model": model or "Unknown",
+        "year": year,
+        "price": price,
+        "currency": currency,
+        "price_azn": to_price_azn(price, currency),
+        "odometer": None,
+        "odometer_type": None,
+        "engine": None,
+        "url": url,
+    }
+
+
 @app.get("/api/inspect")
 def api_inspect(url: str):
     """
-    Load a detail page in a fresh browser page and return:
-      - parsed seller dict (what update_vehicle_detail would store)
-      - all tel: links found
-      - HTML snippet of the seller-area container
-    Useful for diagnosing why seller/phone fields come back empty.
+    Load a detail page, scrape it end-to-end, and upsert the vehicle into
+    the DB (insert if new, update if existing). Returns parsed seller +
+    tel: diagnostics for verification.
+
     Requires scraper NOT to be running (shares the CDP browser).
     """
     global _proc
@@ -443,7 +510,8 @@ def api_inspect(url: str):
         )
 
     from app.scraper.browser import BrowserManager
-    from app.scraper.detail_scraper import _parse_seller
+    from app.scraper.detail_scraper import _parse_seller, scrape_detail
+    from app.scraper.pipeline import upsert_listing, update_vehicle_detail
 
     browser = BrowserManager()
     browser.start()
@@ -510,16 +578,66 @@ def api_inspect(url: str):
             except Exception:
                 continue
 
-        # Parse seller using the real scraper function (this will click again —
-        # idempotent; the phones__list is already populated on this page instance)
+        # Parse seller for the diagnostic output
         try:
             parsed_seller = _parse_seller(page)
         except Exception as e:
             parsed_seller = {"error": str(e)}
 
+        # ── DB upsert ────────────────────────────────────────────────────
+        # Run the full scrape_detail — reuses same page (wait_for_cloudflare
+        # is idempotent, and phones__list is already populated above).
+        detail = {}
+        db_action = "skipped"
+        db_error = None
+        vehicle_id = None
+        try:
+            detail = scrape_detail(page, url)
+        except Exception as e:
+            db_error = f"scrape_detail failed: {e}"
+
+        if detail and not db_error:
+            try:
+                with get_sync_conn() as conn, conn.cursor() as cur:
+                    # Look up existing vehicle by turbo_id (extracted from URL)
+                    import re
+                    tm = re.search(r"/autos/(\d+)", url)
+                    turbo_id = int(tm.group(1)) if tm else None
+                    existing = None
+                    if turbo_id:
+                        cur.execute(
+                            "SELECT id FROM vehicles WHERE turbo_id = %s",
+                            (turbo_id,),
+                        )
+                        existing = cur.fetchone()
+
+                    if existing:
+                        vehicle_id = existing[0]
+                        update_vehicle_detail(conn, vehicle_id, detail)
+                        conn.commit()
+                        db_action = "updated"
+                    else:
+                        # Build minimal listing dict and insert
+                        listing = _extract_listing_fields_from_detail(page, url)
+                        if not listing:
+                            db_error = "could not extract turbo_id from URL"
+                        else:
+                            result = upsert_listing(conn, listing)
+                            # upsert_listing returns (vehicle_id, action, price_changed)
+                            if isinstance(result, tuple):
+                                vehicle_id = result[0]
+                            update_vehicle_detail(conn, vehicle_id, detail)
+                            conn.commit()
+                            db_action = "inserted"
+            except Exception as e:
+                db_error = f"db upsert failed: {e}"
+
         browser.close_page(page)
         return {
             "url": url,
+            "db_action": db_action,
+            "db_error": db_error,
+            "vehicle_id": vehicle_id,
             "tel_hrefs_site_wide": tel_hrefs_all,
             "tel_hrefs_scoped_before_click": tel_hrefs_scoped_before,
             "tel_hrefs_scoped_after_click": tel_hrefs_scoped_after,
