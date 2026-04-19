@@ -12,3 +12,4 @@ dist/
 browser_profile/
 *.log
 .DS_Store
+backend/scraper_checkpoint.txt

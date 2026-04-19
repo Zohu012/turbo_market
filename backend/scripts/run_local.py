@@ -142,14 +142,30 @@ def run(
 
             for make in makes:
                 log.info(f"[make] {make['name']}")
-                try:
-                    vehicles = scrape_make_pages(page, make)
-                    for v in vehicles:
+                committed = {"n": 0}
+
+                def _commit_page(vehicles_on_page):
+                    # Per-page commit — preserves earlier pages if a later
+                    # page times out. Counter is closed-over so we can log
+                    # how many were saved even if the make errors out.
+                    for v in vehicles_on_page:
                         live_ids.add(v["turbo_id"])
                         upsert_listing(conn, v)
-                    log.info(f"  {make['name']}: {len(vehicles)} found")
+                    committed["n"] += len(vehicles_on_page)
+
+                try:
+                    vehicles = scrape_make_pages(
+                        page, make, on_page_complete=_commit_page
+                    )
+                    log.info(
+                        f"  {make['name']}: {len(vehicles)} found, "
+                        f"{committed['n']} committed"
+                    )
                 except Exception as e:
-                    log.error(f"  {make['name']} failed: {e}")
+                    log.error(
+                        f"  {make['name']} failed after committing "
+                        f"{committed['n']} vehicles: {e}"
+                    )
                     continue
                 finally:
                     if not target_make:

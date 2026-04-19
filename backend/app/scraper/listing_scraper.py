@@ -160,21 +160,40 @@ def get_all_makes(page: Page) -> list[dict]:
     )
 
 
+def _goto_with_retry(page: Page, url: str, attempts: int = 2) -> bool:
+    """Navigate with one retry on timeout. Returns True on success."""
+    for i in range(attempts):
+        try:
+            page.goto(url, wait_until="load", timeout=30_000)
+            wait_for_cloudflare(page)
+            return True
+        except Exception as e:
+            if i == attempts - 1:
+                log.warning(f"  goto failed after {attempts} attempts: {url} — {e}")
+                return False
+            log.info(f"  goto retry ({i + 1}/{attempts - 1}): {url}")
+            page.wait_for_timeout(2_000)
+    return False
+
+
 def scrape_make_pages(
     page: Page,
     make: dict,
     start_page: int = 1,
     progress_callback=None,
+    on_page_complete=None,
 ) -> list[dict]:
     """
     Scrape all listing pages for a single make.
     Returns flat list of vehicle dicts from listing cards.
     Calls progress_callback(page_num, total_pages, new_on_page) if provided.
+    Calls on_page_complete(vehicles_on_page) after each page is parsed — use
+    this to commit per-page to DB so a later timeout doesn't lose earlier pages.
     """
     make_url = f"{AUTOS_URL}?q[make][]={make['id']}"
     url = make_url if start_page == 1 else f"{make_url}&page={start_page}"
-    page.goto(url, wait_until="load", timeout=30_000)
-    wait_for_cloudflare(page)
+    if not _goto_with_retry(page, url):
+        return []
 
     total_pages = get_total_pages(page)
     if settings.max_pages > 0:
@@ -183,8 +202,9 @@ def scrape_make_pages(
     all_vehicles = []
     for page_num in range(start_page, total_pages + 1):
         if page_num > start_page:
-            page.goto(f"{make_url}&page={page_num}", wait_until="load", timeout=30_000)
-            wait_for_cloudflare(page)
+            if not _goto_with_retry(page, f"{make_url}&page={page_num}"):
+                log.warning(f"  {make['name']} p{page_num}: goto failed, stopping make.")
+                break
 
         vehicles = parse_listing_page(page)
         if not vehicles:
@@ -192,6 +212,16 @@ def scrape_make_pages(
             break
 
         all_vehicles.extend(vehicles)
+
+        # Commit this page's results immediately so a later timeout can't
+        # discard earlier pages (Chevrolet has 85+ pages — losing them all
+        # because page 85 timed out was the old bug).
+        if on_page_complete:
+            try:
+                on_page_complete(vehicles)
+            except Exception as e:
+                log.error(f"  {make['name']} p{page_num}: on_page_complete raised: {e}")
+
         if progress_callback:
             progress_callback(page_num, total_pages, len(vehicles))
 
