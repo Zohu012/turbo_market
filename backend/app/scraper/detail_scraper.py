@@ -28,11 +28,26 @@ def scrape_detail(page: Page, url: str) -> dict:
     Navigate to a vehicle detail page and return a dict with all available fields.
     Returns empty dict on failure (caller decides how to handle).
     """
-    try:
-        page.goto(url, wait_until="load", timeout=30_000)
-        wait_for_cloudflare(page)
-    except Exception as e:
-        log.warning(f"Failed to load {url}: {e}")
+    # One retry on timeout — flaky navigation is common on detail pages,
+    # but 60s total (30s + 30s) is still cheaper than losing the vehicle.
+    loaded = False
+    last_err: Optional[Exception] = None
+    for attempt in range(2):
+        try:
+            page.goto(url, wait_until="load", timeout=45_000)
+            wait_for_cloudflare(page)
+            loaded = True
+            break
+        except Exception as e:
+            last_err = e
+            if attempt == 0:
+                log.info(f"  Retry detail load: {url}")
+                try:
+                    page.wait_for_timeout(2_000)
+                except Exception:
+                    pass
+    if not loaded:
+        log.warning(f"Failed to load {url}: {last_err}")
         return {}
 
     data: dict = {}

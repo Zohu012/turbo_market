@@ -26,11 +26,23 @@ MULTI_WORD_MAKES = {
 
 # ── Cloudflare ──────────────────────────────────────────────────────────────────
 
-def wait_for_cloudflare(page: Page, timeout_ms: int = 60_000):
+def wait_for_cloudflare(page: Page, timeout_ms: int = 60_000, manual_after_ms: int = 30_000):
+    """
+    Wait for Cloudflare challenge to clear.
+
+    After `manual_after_ms` (30s), assume the challenge is the interactive
+    checkbox variant that needs a human click — bring the tab to front in
+    Chrome, log loudly, and keep waiting indefinitely (no hard timeout)
+    until the title clears. This is the recovery path for CDP mode.
+    """
     start = time.time()
+    brought_to_front = False
+    loud_logged = False
     while True:
         try:
             if "just a moment" not in page.title().lower():
+                if brought_to_front:
+                    log.info("Cloudflare cleared — resuming.")
                 return
         except Exception:
             try:
@@ -38,11 +50,33 @@ def wait_for_cloudflare(page: Page, timeout_ms: int = 60_000):
             except Exception:
                 pass
             return
-        elapsed = (time.time() - start) * 1000
-        if elapsed > timeout_ms:
+        elapsed_ms = (time.time() - start) * 1000
+
+        # After `manual_after_ms`: switch into manual-assist mode
+        if elapsed_ms > manual_after_ms and not brought_to_front:
+            try:
+                page.bring_to_front()
+            except Exception:
+                pass
+            brought_to_front = True
+
+        if brought_to_front:
+            if not loud_logged or int(elapsed_ms / 1000) % 15 == 0:
+                log.warning(
+                    "MANUAL CLICK NEEDED IN CHROME — click the Cloudflare "
+                    f"checkbox on the focused tab ({page.url})"
+                )
+                loud_logged = True
+            page.wait_for_timeout(3_000)
+            continue
+
+        # Pre-manual phase — still within the automatic wait window
+        if elapsed_ms > timeout_ms and not brought_to_front:
+            # Unreachable in practice since manual_after_ms < timeout_ms,
+            # but keep for safety.
             log.warning("Cloudflare challenge did not clear within timeout.")
             return
-        log.info(f"Waiting for Cloudflare... ({int(elapsed / 1000)}s)")
+        log.info(f"Waiting for Cloudflare... ({int(elapsed_ms / 1000)}s)")
         page.wait_for_timeout(2_000)
 
 

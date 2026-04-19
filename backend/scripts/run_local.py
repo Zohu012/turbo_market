@@ -182,18 +182,25 @@ def run(
         else:
             pending = fetch_pending_details(conn, target_make)
             log.info(f"Phase 2: {len(pending)} vehicles pending details")
-            for i, (vehicle_id, url) in enumerate(pending, 1):
-                if i % 50 == 0 or i == len(pending):
-                    log.info(f"  Details: {i}/{len(pending)}")
-                detail_page = browser.new_page()
-                try:
-                    detail = scrape_detail(detail_page, url)
-                    if detail:
-                        update_vehicle_detail(conn, vehicle_id, detail)
-                except Exception as e:
-                    log.warning(f"  Detail fetch failed for {url}: {e}")
-                finally:
-                    browser.close_page(detail_page)
+
+            # Reuse ONE detail page for the whole phase — opening a fresh
+            # tab per vehicle defeats Cloudflare session reuse and makes
+            # manual checkbox clicks useless (user clicks one tab, next
+            # URL opens a different tab). One persistent tab means one
+            # solved challenge = all subsequent navigations clean.
+            detail_page = browser.new_page()
+            try:
+                for i, (vehicle_id, url) in enumerate(pending, 1):
+                    if i % 50 == 0 or i == len(pending):
+                        log.info(f"  Details: {i}/{len(pending)}")
+                    try:
+                        detail = scrape_detail(detail_page, url)
+                        if detail:
+                            update_vehicle_detail(conn, vehicle_id, detail)
+                    except Exception as e:
+                        log.warning(f"  Detail fetch failed for {url}: {e}")
+            finally:
+                browser.close_page(detail_page)
 
             # Completion check — how many still un-detailed after the run?
             remaining = fetch_pending_details(conn, target_make)
