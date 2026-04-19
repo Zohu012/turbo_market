@@ -1,4 +1,7 @@
 .env
+.env.*
+!.env.example
+scraper_checkpoint.txt
 __pycache__/
 *.pyc
 *.pyo
