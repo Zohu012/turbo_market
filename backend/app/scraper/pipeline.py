@@ -26,53 +26,83 @@ def get_sync_conn() -> PGConnection:
 
 # ── Vehicle upsert ──────────────────────────────────────────────────────────────
 
-def upsert_listing(conn: PGConnection, vehicle: dict) -> tuple[str, bool]:
+def upsert_listing(
+    conn: PGConnection, vehicle: dict
+) -> tuple[int, str, bool, bool]:
     """
     Insert or update a vehicle from listing card data.
 
-    Returns (action, price_changed):
-      action = 'new' | 'updated' | 'unchanged'
-      price_changed = True if price was recorded in price_history
+    Returns (vehicle_id, action, price_changed, needs_detail):
+      action         = 'new' | 'updated' | 'unchanged'
+      price_changed  = True if price was recorded in price_history
+      needs_detail   = True if the caller should fetch the detail page
+                       (new row, or date_updated_turbo drift)
     """
     turbo_id = vehicle["turbo_id"]
     now = datetime.now(timezone.utc)
+    listing_dt = vehicle.get("date_updated_turbo")
 
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            "SELECT id, price, currency, status FROM vehicles WHERE turbo_id = %s",
+            """
+            SELECT id, price, currency, odometer, odometer_type, status,
+                   date_updated_turbo, active_days_accumulated, last_activated_at,
+                   date_added
+              FROM vehicles
+             WHERE turbo_id = %s
+            """,
             (turbo_id,),
         )
         row = cur.fetchone()
 
         if row is None:
-            # New vehicle
+            # ── New vehicle ────────────────────────────────────────────────
             cur.execute(
                 """
                 INSERT INTO vehicles
                   (turbo_id, make, model, year, price, currency, price_azn,
-                   odometer, odometer_type, engine, url, status, date_added, date_updated)
+                   odometer, odometer_type, engine, url, status,
+                   date_added, date_updated, date_updated_turbo,
+                   last_activated_at)
                 VALUES
                   (%(turbo_id)s, %(make)s, %(model)s, %(year)s, %(price)s,
                    %(currency)s, %(price_azn)s, %(odometer)s, %(odometer_type)s,
-                   %(engine)s, %(url)s, 'active', %(now)s, %(now)s)
+                   %(engine)s, %(url)s, 'active',
+                   %(now)s, %(now)s, %(date_updated_turbo)s,
+                   %(now)s)
                 RETURNING id
                 """,
-                {**vehicle, "now": now},
+                {**vehicle, "now": now, "date_updated_turbo": listing_dt},
             )
             vehicle_id = cur.fetchone()["id"]
             conn.commit()
-            return vehicle_id, "new", False
+            return vehicle_id, "new", False, True
 
         vehicle_id = row["id"]
 
-        # Check price change
+        # ── Existing vehicle: detect drifts ───────────────────────────────
         price_changed = (
             vehicle.get("price") is not None
-            and (row["price"] != vehicle["price"] or row["currency"] != vehicle["currency"])
+            and (
+                row["price"] != vehicle["price"]
+                or row["currency"] != vehicle["currency"]
+            )
+        )
+        odometer_changed = (
+            vehicle.get("odometer") is not None
+            and row["odometer"] is not None
+            and row["odometer"] != vehicle["odometer"]
         )
 
+        # Freshness check: re-fetch detail only if turbo.az's own "Yeniləndi"
+        # timestamp moved. A new row always needs a detail; a repost does too.
+        needs_detail = False
+        if listing_dt is not None:
+            if row["date_updated_turbo"] is None or row["date_updated_turbo"] != listing_dt:
+                needs_detail = True
+
+        # Price history
         if price_changed:
-            # Record old price in history
             cur.execute(
                 """
                 INSERT INTO price_history (vehicle_id, price, currency, price_azn, recorded_at)
@@ -87,39 +117,120 @@ def upsert_listing(conn: PGConnection, vehicle: dict) -> tuple[str, bool]:
                 ),
             )
 
-        # Re-activate if it was marked inactive (reposted listing)
-        extra = {}
-        if row["status"] == "inactive":
+        # Odometer history — record the OLD value before overwriting.
+        if odometer_changed:
+            cur.execute(
+                """
+                INSERT INTO odometer_history (vehicle_id, odometer, odometer_type, recorded_at)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (vehicle_id, row["odometer"], row["odometer_type"], now),
+            )
+
+        # Reactivation: inactive → active. Accumulate the previous active
+        # window into active_days_accumulated and reset the anchor.
+        extra: dict = {}
+        reactivated = row["status"] == "inactive"
+        if reactivated:
+            anchor = row["last_activated_at"] or row["date_added"]
+            # Use row's date_deactivated via subquery? We already lost it if
+            # we don't re-read — grab it now from the row.
+            cur.execute(
+                "SELECT date_deactivated FROM vehicles WHERE id = %s", (vehicle_id,)
+            )
+            dd_row = cur.fetchone()
+            date_deactivated = dd_row["date_deactivated"] if dd_row else None
+
+            prev_window = 0
+            if anchor and date_deactivated and date_deactivated > anchor:
+                prev_window = (date_deactivated - anchor).days
+            extra["active_days_accumulated"] = (
+                (row["active_days_accumulated"] or 0) + prev_window
+            )
+            extra["last_activated_at"] = now
             extra["date_deactivated"] = None
+            extra["days_to_sell"] = None
             extra["status"] = "active"
+            needs_detail = True  # Always re-fetch detail on reactivation.
 
         update_fields = {
             "price": vehicle.get("price"),
             "currency": vehicle.get("currency"),
             "price_azn": vehicle.get("price_azn"),
+            "odometer": vehicle.get("odometer"),
+            "odometer_type": vehicle.get("odometer_type"),
             "date_updated": now,
             **extra,
         }
-        set_clause = ", ".join(f"{k} = %({k})s" for k in update_fields)
+        if listing_dt is not None:
+            update_fields["date_updated_turbo"] = listing_dt
+
+        # Filter out keys whose value is None AND we don't care about
+        # overwriting with null — keep explicit Nones we set in `extra`.
+        writeable = {
+            k: v
+            for k, v in update_fields.items()
+            if v is not None or k in {"date_deactivated", "days_to_sell"}
+        }
+        set_clause = ", ".join(f"{k} = %({k})s" for k in writeable)
         cur.execute(
             f"UPDATE vehicles SET {set_clause} WHERE id = %(vehicle_id)s",
-            {**update_fields, "vehicle_id": vehicle_id},
+            {**writeable, "vehicle_id": vehicle_id},
         )
         conn.commit()
-        action = "updated" if price_changed or extra else "unchanged"
-        return vehicle_id, action, price_changed
+
+        action: str
+        if price_changed or odometer_changed or reactivated:
+            action = "updated"
+        else:
+            action = "unchanged"
+        return vehicle_id, action, price_changed, needs_detail
 
 
 def update_vehicle_detail(conn: PGConnection, vehicle_id: int, detail: dict):
-    """Apply detail page data (specs, images, seller) to an existing vehicle."""
+    """Apply detail page data (specs, images, seller, features, labels) to an existing vehicle."""
     if not detail:
         return
 
     now = datetime.now(timezone.utc)
 
-    with conn.cursor() as cur:
-        # Update vehicle fields from detail
-        fields = {
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        # ── View count bookkeeping (cumulative on repost) ────────────────
+        scraped_vc = detail.get("view_count_scraped")
+        effective_vc: Optional[int] = None
+        if scraped_vc is not None:
+            cur.execute(
+                "SELECT view_count_base, last_scraped_view_count "
+                "FROM vehicles WHERE id = %s",
+                (vehicle_id,),
+            )
+            row = cur.fetchone() or {}
+            base = row.get("view_count_base") or 0
+            last_scraped = row.get("last_scraped_view_count")
+
+            # Reset detection: the raw number went DOWN. Treat the prior
+            # scraped value as the final count of the previous activation,
+            # move it into view_count_history, and fold it into the base.
+            if last_scraped is not None and scraped_vc < last_scraped:
+                cur.execute(
+                    "INSERT INTO view_count_history (vehicle_id, view_count, recorded_at) "
+                    "VALUES (%s, %s, %s)",
+                    (vehicle_id, last_scraped, now),
+                )
+                base = base + last_scraped
+            # When the raw number grew but is "significantly" different
+            # (e.g. 0 on repost is handled above; otherwise we just update).
+
+            effective_vc = base + scraped_vc
+
+            cur.execute(
+                "UPDATE vehicles SET view_count_base = %s, last_scraped_view_count = %s "
+                "WHERE id = %s",
+                (base, scraped_vc, vehicle_id),
+            )
+
+        # ── Vehicle field map ────────────────────────────────────────────
+        fields: dict = {
             "color": detail.get("color"),
             "body_type": detail.get("body_type"),
             "transmission": detail.get("transmission"),
@@ -127,31 +238,61 @@ def update_vehicle_detail(conn: PGConnection, vehicle_id: int, detail: dict):
             "drive_type": detail.get("drive_type"),
             "doors": detail.get("doors"),
             "vin": detail.get("vin"),
+            "hp": detail.get("hp"),
+            "condition": detail.get("condition"),
+            "market_for": detail.get("market_for"),
             "description": detail.get("description"),
-            "view_count": detail.get("view_count"),
             "city": detail.get("city"),
             "raw_detail_json": psycopg2.extras.Json(detail.get("raw_detail_json")),
             "date_updated": now,
         }
+        if effective_vc is not None:
+            fields["view_count"] = effective_vc
+        if detail.get("date_updated_turbo") is not None:
+            fields["date_updated_turbo"] = detail["date_updated_turbo"]
+        if detail.get("is_on_order") is not None:
+            fields["is_on_order"] = bool(detail.get("is_on_order"))
+
+        # On-order listings: listing cards had no price/odometer, so the
+        # detail page is where they first land.
+        if detail.get("is_on_order"):
+            if detail.get("price") is not None:
+                fields["price"] = detail["price"]
+                fields["currency"] = detail.get("currency")
+                if detail.get("price_azn") is not None:
+                    fields["price_azn"] = detail["price_azn"]
+                else:
+                    fields["price_azn"] = to_price_azn(
+                        detail["price"], detail.get("currency")
+                    )
+            if detail.get("odometer") is not None:
+                fields["odometer"] = detail["odometer"]
+                fields["odometer_type"] = detail.get("odometer_type")
+            if detail.get("engine") is not None:
+                fields["engine"] = detail["engine"]
 
         seller = detail.get("seller", {})
         seller_id = upsert_seller(conn, seller) if seller else None
         if seller_id:
             fields["seller_id"] = seller_id
-            # Increment total_listings
+            # last_seen only (total_listings is incremented on the "new" branch
+            # of upsert_listing; incrementing here double-counts on re-scrapes).
             cur.execute(
-                "UPDATE sellers SET total_listings = total_listings + 1, last_seen = %s WHERE id = %s",
+                "UPDATE sellers SET last_seen = %s WHERE id = %s",
                 (now, seller_id),
             )
 
-        set_clause = ", ".join(f"{k} = %({k})s" for k in fields if fields[k] is not None)
+        set_clause = ", ".join(
+            f"{k} = %({k})s" for k in fields if fields[k] is not None
+        )
         if set_clause:
             cur.execute(
                 f"UPDATE vehicles SET {set_clause} WHERE id = %(vehicle_id)s",
-                {k: v for k, v in fields.items() if v is not None} | {"vehicle_id": vehicle_id},
+                {k: v for k, v in fields.items() if v is not None}
+                | {"vehicle_id": vehicle_id},
             )
 
-        # Insert images (skip if already exist)
+        # ── Images ───────────────────────────────────────────────────────
         images = detail.get("images", [])
         if images:
             cur.execute("DELETE FROM vehicle_images WHERE vehicle_id = %s", (vehicle_id,))
@@ -164,6 +305,56 @@ def update_vehicle_detail(conn: PGConnection, vehicle_id: int, detail: dict):
                 ],
             )
 
+        # ── Features / labels (M2M) ──────────────────────────────────────
+        _replace_m2m(cur, vehicle_id, detail.get("features", []), "features", "vehicle_features", "feature_id")
+        _replace_m2m(cur, vehicle_id, detail.get("labels", []), "labels", "vehicle_labels", "label_id")
+
+        conn.commit()
+
+
+def mark_delisted(conn: PGConnection, vehicle_id: int) -> None:
+    """
+    Mark a vehicle as sold/delisted WITHOUT overwriting its existing data.
+
+    Freezes days_to_sell = active_days_accumulated + (now - last_activated_at).
+    Called when the detail page shows any delisted marker (status-message,
+    overlay, or missing sidebar) even if the turbo_id still appears in the
+    listing scan.
+    """
+    now = datetime.now(timezone.utc)
+
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT status, active_days_accumulated, last_activated_at, date_added, seller_id "
+            "FROM vehicles WHERE id = %s",
+            (vehicle_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return
+        if row["status"] == "inactive":
+            return  # Already delisted — don't re-freeze days_to_sell.
+
+        anchor = row["last_activated_at"] or row["date_added"]
+        window = (now - anchor).days if anchor and now > anchor else 0
+        days_to_sell = (row["active_days_accumulated"] or 0) + window
+
+        cur.execute(
+            """
+            UPDATE vehicles
+               SET status = 'inactive',
+                   date_deactivated = %s,
+                   date_updated = %s,
+                   days_to_sell = %s
+             WHERE id = %s
+            """,
+            (now, now, days_to_sell, vehicle_id),
+        )
+        if row["seller_id"]:
+            cur.execute(
+                "UPDATE sellers SET total_sold = total_sold + 1 WHERE id = %s",
+                (row["seller_id"],),
+            )
         conn.commit()
 
 
@@ -208,9 +399,8 @@ def upsert_seller(conn: PGConnection, seller: dict) -> Optional[int]:
                 seller_id = row["seller_id"]
 
         if seller_id is not None:
-            # Update mutable fields (only if new value is non-null)
             updates = {"last_seen": now}
-            for k in ("name", "seller_type", "city", "profile_url"):
+            for k in ("name", "seller_type", "city", "profile_url", "regdate"):
                 v = seller.get(k)
                 if v:
                     updates[k] = v
@@ -225,16 +415,18 @@ def upsert_seller(conn: PGConnection, seller: dict) -> Optional[int]:
             cur.execute(
                 """
                 INSERT INTO sellers
-                  (turbo_seller_id, name, seller_type, city, profile_url, first_seen, last_seen)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                  (turbo_seller_id, name, seller_type, city, profile_url,
+                   regdate, first_seen, last_seen, total_listings)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1)
                 RETURNING id
                 """,
                 (
                     turbo_id,
                     seller.get("name"),
-                    seller.get("seller_type", "private"),
+                    seller.get("seller_type"),
                     seller.get("city"),
                     seller.get("profile_url"),
+                    seller.get("regdate"),
                     now,
                     now,
                 ),
@@ -253,3 +445,65 @@ def upsert_seller(conn: PGConnection, seller: dict) -> Optional[int]:
 
         conn.commit()
         return seller_id
+
+
+def increment_seller_listings(conn: PGConnection, seller_id: int) -> None:
+    """Bump total_listings by 1. Called by the caller on the 'new' branch
+    of upsert_listing once a seller_id is known via detail fetch."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE sellers SET total_listings = total_listings + 1 WHERE id = %s",
+            (seller_id,),
+        )
+    conn.commit()
+
+
+# ── M2M helper ──────────────────────────────────────────────────────────────────
+
+def _replace_m2m(
+    cur,
+    vehicle_id: int,
+    names: list[str],
+    dim_table: str,
+    join_table: str,
+    join_fk: str,
+) -> None:
+    """
+    Replace the set of M2M rows for a vehicle. Upserts names into the dim
+    table, then rewrites the join rows.
+    """
+    # Strip empties and dedupe while preserving order.
+    seen: set[str] = set()
+    clean: list[str] = []
+    for n in names or []:
+        n = (n or "").strip()
+        if n and n not in seen:
+            seen.add(n)
+            clean.append(n)
+
+    # Always clear the join rows for this vehicle — even if `clean` is empty,
+    # a vehicle that previously had features can have them removed.
+    cur.execute(f"DELETE FROM {join_table} WHERE vehicle_id = %s", (vehicle_id,))
+    if not clean:
+        return
+
+    # Upsert dim rows, then read back ids.
+    psycopg2.extras.execute_values(
+        cur,
+        f"INSERT INTO {dim_table} (name) VALUES %s ON CONFLICT (name) DO NOTHING",
+        [(n,) for n in clean],
+    )
+    cur.execute(
+        f"SELECT id, name FROM {dim_table} WHERE name = ANY(%s)",
+        (clean,),
+    )
+    id_by_name = {r["name"]: r["id"] for r in cur.fetchall()}
+
+    rows = [(vehicle_id, id_by_name[n]) for n in clean if n in id_by_name]
+    if rows:
+        psycopg2.extras.execute_values(
+            cur,
+            f"INSERT INTO {join_table} (vehicle_id, {join_fk}) VALUES %s "
+            f"ON CONFLICT DO NOTHING",
+            rows,
+        )

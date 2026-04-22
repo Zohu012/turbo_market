@@ -1,16 +1,23 @@
 """
 Detail page scraper — fetches /autos/{turbo_id} and extracts full vehicle data.
 
-Collects: images, all spec table fields, description, seller info, view count.
+Collects: images, all spec table fields, description, seller info, view count,
+features, labels, on-order pricing, delisted status.
 """
 import json
 import logging
 import re
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from playwright.sync_api import Page
 
-from app.scraper.listing_scraper import wait_for_cloudflare, to_price_azn, parse_price
+from app.scraper.listing_scraper import (
+    BAKU_TZ,
+    wait_for_cloudflare,
+    to_price_azn,
+    parse_price,
+)
 
 log = logging.getLogger(__name__)
 
@@ -23,10 +30,113 @@ def normalize_phone(raw: str) -> str:
     return digits
 
 
+def parse_engine(raw: Optional[str]) -> tuple[Optional[str], Optional[int], Optional[str]]:
+    """
+    Parse the engine property value. Examples:
+      "1.5 L / 185 a.g. / Benzin"     -> ("1.5 L", 185, "Benzin")
+      "690 a.g. / Elektro"            -> (None,    690, "Elektro")
+      "Benzin"                         -> (None,    None, "Benzin")
+    Returns (engine_volume, hp, fuel_type).
+    """
+    if not raw:
+        return None, None, None
+
+    parts = [p.strip() for p in raw.split("/") if p.strip()]
+    hp: Optional[int] = None
+    fuel_type: Optional[str] = None
+    engine_volume: Optional[str] = None
+
+    # hp = any segment matching "<digits> a.g." (Azerbaijani for "h.p.")
+    for p in parts:
+        m = re.search(r"(\d+)\s*a\.g\.?", p, re.IGNORECASE)
+        if m and hp is None:
+            hp = int(m.group(1))
+
+    # Anything without digits and without "L" is the fuel type — typically
+    # the last segment (Benzin/Dizel/Elektro/Hibrid/...).
+    for p in reversed(parts):
+        if not re.search(r"\d", p) and not re.search(r"\bL\b", p):
+            fuel_type = p
+            break
+    if fuel_type is None:
+        # fall back to the last segment verbatim
+        fuel_type = parts[-1] if parts else None
+
+    # Engine volume = first segment containing "L" (e.g., "1.5 L").
+    for p in parts:
+        if re.search(r"\bL\b", p):
+            engine_volume = p
+            break
+
+    return engine_volume, hp, fuel_type
+
+
+_DATE_DDMMYYYY = re.compile(r"(\d{2})\.(\d{2})\.(\d{4})")
+
+
+def parse_turbo_date(raw: Optional[str]) -> Optional[datetime]:
+    """Parse 'DD.MM.YYYY' (no time) as UTC midnight Baku time → UTC."""
+    if not raw:
+        return None
+    m = _DATE_DDMMYYYY.search(raw)
+    if not m:
+        return None
+    try:
+        local = datetime(
+            int(m.group(3)), int(m.group(2)), int(m.group(1)),
+            tzinfo=BAKU_TZ,
+        )
+    except ValueError:
+        return None
+    return local.astimezone(timezone.utc)
+
+
+_REGDATE_RE = re.compile(r"(\d{2})\.(\d{4})")
+
+
+def parse_regdate(raw: Optional[str]) -> Optional[date]:
+    """Parse seller's 'Satıcı MM.YYYY tarixindən ...' → date(YYYY, MM, 1)."""
+    if not raw:
+        return None
+    m = _REGDATE_RE.search(raw)
+    if not m:
+        return None
+    try:
+        return date(int(m.group(2)), int(m.group(1)), 1)
+    except ValueError:
+        return None
+
+
+def _detect_delisted(page: Page) -> bool:
+    """Three overlapping delisted markers — any one is sufficient."""
+    try:
+        if page.query_selector(".status-message--expired"):
+            return True
+    except Exception:
+        pass
+    try:
+        overlay = page.query_selector(".product-photos__slider-top-i_overlay")
+        if overlay:
+            text = (overlay.inner_text() or "").strip().lower()
+            if "satışdan çıxarılıb" in text:
+                return True
+    except Exception:
+        pass
+    try:
+        if not page.query_selector(".product-sidebar__box"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def scrape_detail(page: Page, url: str) -> dict:
     """
     Navigate to a vehicle detail page and return a dict with all available fields.
     Returns empty dict on failure (caller decides how to handle).
+
+    If the listing is delisted, returns {"delisted": True} — callers should
+    mark the vehicle inactive WITHOUT overwriting its existing data.
     """
     # One retry on timeout — flaky navigation is common on detail pages,
     # but 60s total (30s + 30s) is still cheaper than losing the vehicle.
@@ -50,6 +160,11 @@ def scrape_detail(page: Page, url: str) -> dict:
         log.warning(f"Failed to load {url}: {last_err}")
         return {}
 
+    # Cheap delisted check up front — skips all the parsing below if the
+    # listing has been removed. Caller will preserve existing DB data.
+    if _detect_delisted(page):
+        return {"delisted": True}
+
     data: dict = {}
 
     # ── Images ──────────────────────────────────────────────────────────────────
@@ -58,11 +173,11 @@ def scrape_detail(page: Page, url: str) -> dict:
             ".product-photos__list img, .product-photos img, .photo-gallery img",
             "els => els.map(e => e.getAttribute('src') || e.getAttribute('data-src') || '').filter(Boolean)"
         )
-        # Deduplicate while preserving order
+        # Deduplicate while preserving order.
         seen = set()
         unique_images = []
         for img in images:
-            if img not in seen and "turbo.az" in img or img.startswith("https://"):
+            if img not in seen and ("turbo.az" in img or img.startswith("https://")):
                 seen.add(img)
                 unique_images.append(img)
         data["images"] = unique_images
@@ -90,13 +205,52 @@ def scrape_detail(page: Page, url: str) -> dict:
         data["color"] = _find(specs, ["rəng", "color", "цвет"])
         data["body_type"] = _find(specs, ["ban növü", "body type", "кузов", "növü"])
         data["transmission"] = _find(specs, ["sürətlər qutusu", "transmission", "коробка передач", "sürət"])
-        data["fuel_type"] = _find(specs, ["yanacaq", "fuel type", "двигатель", "mühərrik növü"])
         data["drive_type"] = _find(specs, ["ötürücü", "drive", "привод"])
         data["doors"] = _parse_int(_find(specs, ["qapı sayı", "doors", "двери"]))
         data["vin"] = _find(specs, ["vin", "vin-kod"])
+        data["condition"] = _find(specs, ["vəziyyəti", "condition", "состояние"])
+        data["market_for"] = _find(
+            specs, ["hansı bazar üçün yığılıb", "market", "рынок"]
+        )
+
+        # Engine → (volume, hp, fuel_type). Keep the raw engine text too
+        # (existing `engine` column holds the string form for display).
+        engine_raw = _find(
+            specs, ["mühərrik", "engine", "двигатель"]
+        )
+        engine_volume, hp, fuel_from_engine = parse_engine(engine_raw)
+        data["engine"] = engine_raw
+        data["engine_volume"] = engine_volume
+        data["hp"] = hp
+
+        # fuel_type: prefer dedicated spec field if present, else the last
+        # segment of the engine value.
+        data["fuel_type"] = (
+            _find(specs, ["yanacaq", "fuel type", "mühərrik növü"])
+            or fuel_from_engine
+        )
+
+        # Odometer from specs (for on-order listings where the listing-page
+        # card didn't carry odometer; harmless for regular listings).
+        odo_raw = _find(specs, ["yürüş", "mileage", "пробег"])
+        odo_val, odo_type = _parse_odometer_spec(odo_raw)
+        if odo_val is not None:
+            data["odometer"] = odo_val
+            data["odometer_type"] = odo_type
     except Exception as e:
         log.debug(f"Specs parse error for {url}: {e}")
         data["specs"] = {}
+
+    # VIN fallback from the dedicated copy-block (some pages only render it here).
+    if not data.get("vin"):
+        try:
+            vin_el = page.query_selector(".product-vin__title .js-copy-text")
+            if vin_el:
+                txt = (vin_el.inner_text() or "").strip()
+                if txt:
+                    data["vin"] = txt
+        except Exception:
+            pass
 
     # ── Description ─────────────────────────────────────────────────────────────
     try:
@@ -106,19 +260,75 @@ def scrape_detail(page: Page, url: str) -> dict:
     except Exception:
         pass
 
-    # ── View count ──────────────────────────────────────────────────────────────
+    # ── Statistics strip (view count + date updated on turbo.az) ────────────────
     try:
-        view_el = page.query_selector(".product-statistics__i-count, .view-count")
-        if view_el:
-            data["view_count"] = _parse_int(view_el.inner_text())
+        stat_texts = page.eval_on_selector_all(
+            ".product-statistics__i-text",
+            "els => els.map(e => e.textContent.trim())",
+        )
+        for text in stat_texts:
+            m = re.search(r"baxışların sayı:\s*(\d+)", text, re.IGNORECASE)
+            if m:
+                data["view_count_scraped"] = int(m.group(1))
+                continue
+            m = re.search(r"yeniləndi:\s*(\d{2}\.\d{2}\.\d{4})", text, re.IGNORECASE)
+            if m:
+                data["date_updated_turbo"] = parse_turbo_date(m.group(1))
+    except Exception as e:
+        log.debug(f"Statistics parse error for {url}: {e}")
+
+    # ── Features (ABS, Lyuk, Kondisioner, …) ────────────────────────────────────
+    try:
+        features = page.eval_on_selector_all(
+            "ul.product-extras li.product-extras__i, .product-extras__i",
+            "els => els.map(e => e.textContent.trim()).filter(Boolean)",
+        )
+        # Deduplicate in-order
+        seen_f = set()
+        dedup_f: list[str] = []
+        for f in features:
+            if f not in seen_f:
+                seen_f.add(f)
+                dedup_f.append(f)
+        data["features"] = dedup_f
+    except Exception as e:
+        log.debug(f"Features parse error for {url}: {e}")
+        data["features"] = []
+
+    # ── Labels (Kredit, Barter, …) ──────────────────────────────────────────────
+    try:
+        labels = page.eval_on_selector_all(
+            ".product-labels .product-labels__i",
+            "els => els.map(e => e.textContent.trim()).filter(Boolean)",
+        )
+        seen_l = set()
+        dedup_l: list[str] = []
+        for lbl in labels:
+            if lbl not in seen_l:
+                seen_l.add(lbl)
+                dedup_l.append(lbl)
+        data["labels"] = dedup_l
+    except Exception as e:
+        log.debug(f"Labels parse error for {url}: {e}")
+        data["labels"] = []
+
+    # ── On-order sidebar variant (Sifarişlə) ────────────────────────────────────
+    is_on_order = False
+    try:
+        is_on_order = page.query_selector(".product-shop__status_order") is not None
     except Exception:
         pass
+    data["is_on_order"] = is_on_order
+
+    if is_on_order:
+        _fill_on_order_pricing(page, data)
 
     # ── Seller ──────────────────────────────────────────────────────────────────
     try:
         seller_data = _parse_seller(page)
         data["seller"] = seller_data
-        data["city"] = seller_data.get("city")
+        if not data.get("city"):
+            data["city"] = seller_data.get("city")
     except Exception as e:
         log.debug(f"Seller parse error for {url}: {e}")
         data["seller"] = {}
@@ -127,9 +337,94 @@ def scrape_detail(page: Page, url: str) -> dict:
     data["raw_detail_json"] = {
         "specs": data.get("specs", {}),
         "images": data.get("images", []),
+        "features": data.get("features", []),
+        "labels": data.get("labels", []),
+        "is_on_order": is_on_order,
     }
 
     return data
+
+
+def _fill_on_order_pricing(page: Page, data: dict) -> None:
+    """
+    On-order sidebars show pricing differently from the standard box:
+      <div class="product-price__i product-price__i--bold">≈ 260 100 ₼</div>
+      <div class="product-price__i tz-mt-10">153 000 USD</div>
+    The bold line is the AZN estimate; the plain line is the list currency (USD
+    in most cases). We take the USD value as the authoritative `price` +
+    `currency`, and the AZN value as `price_azn`.
+    """
+    try:
+        price_blocks = page.eval_on_selector_all(
+            ".product-sidebar__box .product-price .product-price__i",
+            """els => els.map(e => ({
+                text: e.textContent.trim(),
+                bold: e.classList.contains('product-price__i--bold'),
+            }))""",
+        )
+    except Exception as e:
+        log.debug(f"On-order pricing parse error: {e}")
+        return
+
+    bold_text = None
+    plain_text = None
+    for block in price_blocks:
+        if block["bold"] and not bold_text:
+            bold_text = block["text"]
+        elif not block["bold"] and not plain_text:
+            plain_text = block["text"]
+
+    # Plain block is the primary list currency (e.g. "153 000 USD").
+    if plain_text:
+        price, currency = _parse_any_price(plain_text)
+        if price is not None:
+            data["price"] = price
+            data["currency"] = currency
+    # Bold block is the AZN estimate ("≈ 260 100 ₼").
+    if bold_text:
+        azn, cur = _parse_any_price(bold_text)
+        if azn is not None and cur == "AZN":
+            data["price_azn"] = float(azn)
+
+    # Fallback: if we only extracted an AZN estimate, surface it as price too.
+    if data.get("price") is None and data.get("price_azn") is not None:
+        data["price"] = int(data["price_azn"])
+        data["currency"] = "AZN"
+
+
+def _parse_any_price(text: str) -> tuple[Optional[int], Optional[str]]:
+    """Extract an integer + currency code from mixed-symbol text."""
+    price, currency = parse_price(text)
+    if price is not None:
+        return price, currency
+    # Fallback: "NNN USD" / "NNN EUR" / "NNN AZN" word forms.
+    m = re.search(
+        r"([\d\s]+)\s*(USD|EUR|AZN|RUB|GBP)\b",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        return (
+            int(re.sub(r"\s", "", m.group(1))),
+            m.group(2).upper(),
+        )
+    return None, None
+
+
+def _parse_odometer_spec(raw: Optional[str]) -> tuple[Optional[int], Optional[str]]:
+    """Parse '747 km' / '120 000 mi' → (747, 'km')."""
+    if not raw:
+        return None, None
+    m = re.search(r"([\d\s]+)\s*(km|mi|км|mi\.)", raw, re.IGNORECASE)
+    if not m:
+        return None, None
+    digits = re.sub(r"\s", "", m.group(1))
+    if not digits:
+        return None, None
+    unit = m.group(2).lower()
+    unit = "km" if unit.startswith("к") or unit == "km" else unit
+    unit = "mi" if unit.startswith("mi") else unit
+    return int(digits), unit
 
 
 def _parse_seller(page: Page) -> dict:
@@ -137,20 +432,25 @@ def _parse_seller(page: Page) -> dict:
     Extract seller info from a turbo.az detail page.
 
     DOM reference (verified 2026-04):
-      .product-owner
-        .product-owner__info
-          .product-owner__info-name      → name
-          .product-owner__info-region    → city
-          .product-owner__info-regdate   → "Satıcı MM.YYYY tarixindən ..." (join date)
+      .product-owner (private-seller layout)
+        .product-owner__info-name      → name
+        .product-owner__info-region    → city
+        .product-owner__info-regdate   → "Satıcı MM.YYYY tarixindən ..." (join date)
+
+      .product-sidebar__box (shop / on-order layouts)
+        .product-shop__owner-name      → shop name
+        .product-shop__location        → city/address
+        .product-shop__regdate         → "Satıcı MM.YYYY tarixindən ..."
+        a[href^="/avtosalonlar/"]      → shop profile URL (Dilerə keç button)
+
       .product-phones.js-phone-reveal
-        .product-phones__btn.js-phone-reveal-btn   → click to reveal
+        .product-phones__btn.js-phone-reveal-btn    → click to reveal
         .product-phones__list
-          a.product-phones__list-i[href^="tel:"]   → one <a> per phone number
+          a.product-phones__list-i[href^="tel:"]    → phone numbers
 
       #chat-write-link
-        data-user      → numeric turbo.az user id (stable, unique per seller)
-        data-receiver  → JSON with {id, name, phones: [...]} (phones available
-                         WITHOUT clicking reveal — use as primary source)
+        data-user     → numeric turbo.az user id (stable per seller)
+        data-receiver → JSON {id, name, phones: [...]}   (may leak phones)
     """
     seller: dict = {}
 
@@ -200,7 +500,6 @@ def _parse_seller(page: Page) -> dict:
     phones_raw = _read_list_phones()
 
     if not phones_raw:
-        # Click the reveal button; then wait for the list to render
         try:
             btn = page.query_selector(
                 ".product-phones__btn.js-phone-reveal-btn, "
@@ -220,7 +519,6 @@ def _parse_seller(page: Page) -> dict:
         except Exception:
             pass
 
-    # Fallback: data-receiver (only when logged in — usually empty for unauthed)
     if not phones_raw and dr_phones:
         phones_raw = dr_phones
 
@@ -229,11 +527,12 @@ def _parse_seller(page: Page) -> dict:
         p for p in (normalize_phone(x) for x in phones_raw) if p
     ]
 
-    # ── Name / city / regdate from product-owner block ──────────────────────
+    # ── Name / city / regdate from whichever block is present ───────────────
+    # Private-seller block
     for sel, key in [
         (".product-owner__info-name", "name"),
         (".product-owner__info-region", "city"),
-        (".product-owner__info-regdate", "regdate"),
+        (".product-owner__info-regdate", "regdate_raw"),
     ]:
         if seller.get(key):
             continue
@@ -246,11 +545,34 @@ def _parse_seller(page: Page) -> dict:
         except Exception:
             continue
 
-    # ── Profile URL (shops link, if present) ────────────────────────────────
+    # Shop / on-order block (also sets regdate if private block was absent)
+    for sel, key in [
+        (".product-shop__owner-name", "name"),
+        (".product-shop__location a", "city"),
+        (".product-shop__regdate", "regdate_raw"),
+    ]:
+        if seller.get(key):
+            continue
+        try:
+            el = page.query_selector(sel)
+            if el:
+                txt = (el.inner_text() or "").strip()
+                if txt:
+                    seller[key] = txt
+        except Exception:
+            continue
+
+    # Normalize regdate: "Satıcı 12.2025 tarixindən..." → date(2025, 12, 1)
+    regdate = parse_regdate(seller.pop("regdate_raw", None))
+    if regdate:
+        seller["regdate"] = regdate
+
+    # ── Profile URL (dealer shop link on /avtosalonlar/) ────────────────────
     profile_url = None
     try:
         el = page.query_selector(
-            '.product-owner a[href*="/shops/"], a.product-owner__info-title'
+            '.product-sidebar__box a[href^="/avtosalonlar/"], '
+            'a.tz-btn--blue[href^="/avtosalonlar/"]'
         )
         if el:
             href = el.get_attribute("href")
@@ -263,17 +585,12 @@ def _parse_seller(page: Page) -> dict:
     if profile_url:
         seller["profile_url"] = profile_url
 
-    # ── Dealer detection ────────────────────────────────────────────────────
-    is_dealer = False
-    if profile_url and "/shops/" in profile_url:
-        is_dealer = True
-    else:
-        try:
-            if page.query_selector(".product-owner__logo img, .shop-owner, .shop-badge"):
-                is_dealer = True
-        except Exception:
-            pass
-    seller["seller_type"] = "dealer" if is_dealer else "private"
+    # ── Rough per-page type hint ────────────────────────────────────────────
+    # Final business/dealer/private classification runs in seller_classifier
+    # after the scrape; this is only a placeholder so new sellers aren't
+    # immediately mislabeled.
+    if profile_url and "/avtosalonlar/" in profile_url:
+        seller["seller_type"] = "business"
 
     return seller
 

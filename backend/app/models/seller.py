@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional, TYPE_CHECKING
 
-from sqlalchemy import BigInteger, ForeignKey, Index, Numeric, String, TIMESTAMP, func
+from sqlalchemy import BigInteger, Date, ForeignKey, Index, Numeric, String, TIMESTAMP, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -16,9 +16,13 @@ class Seller(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     turbo_seller_id: Mapped[Optional[str]] = mapped_column(String(100), unique=True)
     name: Mapped[Optional[str]] = mapped_column(String(255))
-    seller_type: Mapped[Optional[str]] = mapped_column(String(20))  # 'dealer' | 'private'
+    # 'business' = has /avtosalonlar/ shop page
+    # 'dealer'   = no shop page, but >1 lifetime listing
+    # 'private'  = everyone else
+    seller_type: Mapped[Optional[str]] = mapped_column(String(20))
     city: Mapped[Optional[str]] = mapped_column(String(100))
     profile_url: Mapped[Optional[str]] = mapped_column(String(500))
+    regdate: Mapped[Optional[date]] = mapped_column(Date)
     first_seen: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )

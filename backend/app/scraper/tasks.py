@@ -16,8 +16,14 @@ from app.scraper.celery_app import celery_app
 from app.scraper.browser import BrowserManager
 from app.scraper.listing_scraper import get_all_makes, scrape_make_pages
 from app.scraper.detail_scraper import scrape_detail
-from app.scraper.pipeline import get_sync_conn, upsert_listing, update_vehicle_detail
+from app.scraper.pipeline import (
+    get_sync_conn,
+    upsert_listing,
+    update_vehicle_detail,
+    mark_delisted,
+)
 from app.scraper.lifecycle import run_lifecycle_check_sync
+from app.scraper.seller_classifier import reclassify_sellers
 from app.config import settings
 
 log = logging.getLogger(__name__)
@@ -64,7 +70,12 @@ def _create_job(conn, job_type: str, triggered_by: str, target_make=None, target
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def fetch_detail(self, vehicle_id: int, url: str, job_id: Optional[int] = None):
-    """Fetch vehicle detail page and update DB record."""
+    """Fetch vehicle detail page and update DB record.
+
+    If the detail page indicates the listing was delisted, mark the vehicle
+    inactive without overwriting the rest of its data. Otherwise apply the
+    full detail payload.
+    """
     try:
         browser = get_browser()
         page = browser.new_page()
@@ -73,12 +84,17 @@ def fetch_detail(self, vehicle_id: int, url: str, job_id: Optional[int] = None):
         finally:
             browser.close_page(page)
 
-        if detail:
-            conn = get_sync_conn()
-            try:
+        if not detail:
+            return
+
+        conn = get_sync_conn()
+        try:
+            if detail.get("delisted"):
+                mark_delisted(conn, vehicle_id)
+            else:
                 update_vehicle_detail(conn, vehicle_id, detail)
-            finally:
-                conn.close()
+        finally:
+            conn.close()
     except Exception as exc:
         log.error(f"fetch_detail failed for {url}: {exc}")
         raise self.retry(exc=exc)
@@ -100,16 +116,19 @@ def scrape_make_task(self, make: dict, job_id: Optional[int] = None) -> dict:
 
         for v in vehicles:
             live_ids.append(v["turbo_id"])
-            vehicle_id, action, _ = upsert_listing(conn, v)
+            vehicle_id, action, _, needs_detail = upsert_listing(conn, v)
             if action == "new":
                 counters["new"] += 1
-                # Queue detail fetch
+            elif action == "updated":
+                counters["updated"] += 1
+            # Queue detail fetch whenever the listing is new OR turbo.az's
+            # own "Yeniləndi" timestamp moved. Unchanged rows with the same
+            # timestamp skip the detail phase entirely.
+            if needs_detail:
                 fetch_detail.apply_async(
                     args=[vehicle_id, v["url"], job_id],
                     queue="detail",
                 )
-            elif action == "updated":
-                counters["updated"] += 1
 
         if job_id:
             _update_job_status(
@@ -152,6 +171,9 @@ def lifecycle_check_task(self, results: list[dict], job_id: Optional[int] = None
     conn = get_sync_conn()
     deactivated = run_lifecycle_check_sync(conn, live_ids)
     try:
+        # Re-derive shop/dealer/private classification from the new state of
+        # the world. Cheap — three bulk UPDATEs, one pass per scrape.
+        reclassify_sellers(conn)
         _update_job_status(
             conn,
             job_id,

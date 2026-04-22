@@ -7,11 +7,15 @@ Returns structured dicts ready for DB upsert.
 import logging
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
 
 from app.config import settings
+
+# Baku is UTC+4 year-round (no DST). turbo.az timestamps are local Baku time.
+BAKU_TZ = timezone(timedelta(hours=4))
 
 log = logging.getLogger(__name__)
 
@@ -122,6 +126,36 @@ def to_price_azn(price: Optional[int], currency: Optional[str]) -> Optional[floa
     return None
 
 
+# Matches "Bakı, 15.04.2026 10:53" (city is everything before the first comma;
+# we only care about the date+time). Date-only ("15.04.2026") also accepted.
+_LISTING_DT_RE = re.compile(
+    r"(\d{2})\.(\d{2})\.(\d{4})(?:\s+(\d{1,2}):(\d{2}))?"
+)
+
+
+def parse_listing_datetime(raw: Optional[str]) -> Optional[datetime]:
+    """
+    Parse a .products-i__datetime string like "Bakı, 15.04.2026 10:53".
+    Returns a timezone-aware UTC datetime, or None if the pattern doesn't match.
+    """
+    if not raw:
+        return None
+    # Everything after the first comma is the timestamp portion.
+    if "," in raw:
+        raw = raw.split(",", 1)[1]
+    m = _LISTING_DT_RE.search(raw)
+    if not m:
+        return None
+    day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    hour = int(m.group(4)) if m.group(4) else 0
+    minute = int(m.group(5)) if m.group(5) else 0
+    try:
+        local = datetime(year, month, day, hour, minute, tzinfo=BAKU_TZ)
+    except ValueError:
+        return None
+    return local.astimezone(timezone.utc)
+
+
 # ── Page parsing ────────────────────────────────────────────────────────────────
 
 def parse_listing_page(page: Page) -> list[dict]:
@@ -132,11 +166,13 @@ def parse_listing_page(page: Page) -> list[dict]:
             const name  = el.querySelector('.products-i__name');
             const attrs = el.querySelector('.products-i__attributes');
             const price = el.querySelector('.products-i__price');
+            const dt    = el.querySelector('.products-i__datetime');
             return {
                 href:  link  ? link.getAttribute('href')  : '',
                 name:  name  ? name.textContent.trim()    : '',
                 attrs: attrs ? attrs.textContent.trim()   : '',
                 price: price ? price.textContent.trim()   : '',
+                dt:    dt    ? dt.textContent.trim()      : '',
             };
         })"""
     )
@@ -171,6 +207,7 @@ def parse_listing_page(page: Page) -> list[dict]:
             "odometer_type": odo_type,
             "engine": engine,
             "url": url,
+            "date_updated_turbo": parse_listing_datetime(c["dt"]),
         })
     return results
 
