@@ -152,11 +152,16 @@ def to_price_azn(price: Optional[int], currency: Optional[str]) -> Optional[floa
 _LISTING_DT_RE = re.compile(
     r"(\d{2})\.(\d{2})\.(\d{4})(?:\s+(\d{1,2}):(\d{2}))?"
 )
+# Matches relative Azerbaijani times: "bugün 22:10" or "dünən 21:04"
+_LISTING_RELATIVE_RE = re.compile(
+    r"\b(bugün|dünən)\s+(\d{1,2}):(\d{2})\b"
+)
 
 
 def parse_listing_datetime(raw: Optional[str]) -> Optional[datetime]:
     """
-    Parse a .products-i__datetime string like "Bakı, 15.04.2026 10:53".
+    Parse a .products-i__datetime string like "Bakı, 15.04.2026 10:53",
+    "Bakı, bugün 22:10", or "Bakı, dünən 21:04".
     Returns a timezone-aware UTC datetime, or None if the pattern doesn't match.
     """
     if not raw:
@@ -164,6 +169,17 @@ def parse_listing_datetime(raw: Optional[str]) -> Optional[datetime]:
     # Everything after the first comma is the timestamp portion.
     if "," in raw:
         raw = raw.split(",", 1)[1]
+    # Try relative terms first (bugün = today, dünən = yesterday in Baku time).
+    rel = _LISTING_RELATIVE_RE.search(raw)
+    if rel:
+        word, hour, minute = rel.group(1), int(rel.group(2)), int(rel.group(3))
+        today_baku = datetime.now(BAKU_TZ).date()
+        date = today_baku if word == "bugün" else today_baku - timedelta(days=1)
+        try:
+            local = datetime(date.year, date.month, date.day, hour, minute, tzinfo=BAKU_TZ)
+        except ValueError:
+            return None
+        return local.astimezone(timezone.utc)
     m = _LISTING_DT_RE.search(raw)
     if not m:
         return None
