@@ -12,6 +12,7 @@ Features:
     - Shows checkpoint, DB stats, pending details count
 """
 import json
+import os
 import subprocess
 import sys
 from collections import deque
@@ -23,14 +24,36 @@ CHECKPOINT_FILE = BACKEND_DIR / "scraper_checkpoint.txt"
 
 sys.path.insert(0, str(BACKEND_DIR))
 
-import uvicorn
-from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse, JSONResponse
+# Load backend/.env before anything imports app.config (so settings pick it up).
+from dotenv import load_dotenv  # noqa: E402
+load_dotenv(BACKEND_DIR / ".env")
 
-from app.scraper.pipeline import get_sync_conn
+import uvicorn  # noqa: E402
+from fastapi import FastAPI, Query  # noqa: E402
+from fastapi.responses import HTMLResponse, JSONResponse  # noqa: E402
+
+from app.scraper.pipeline import get_sync_conn  # noqa: E402
 
 app = FastAPI()
 _proc: subprocess.Popen | None = None
+_startup_warning: str | None = None
+
+
+def _auto_migrate() -> None:
+    """Apply pending alembic migrations on startup. Warns on failure but does not crash."""
+    global _startup_warning
+    try:
+        from alembic import command
+        from alembic.config import Config
+
+        cfg = Config(str(BACKEND_DIR / "alembic.ini"))
+        cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
+        command.upgrade(cfg, "head")
+        print("[startup] alembic upgrade head OK")
+    except Exception as e:
+        msg = f"alembic upgrade failed: {e}"
+        print(f"[startup] WARNING: {msg}")
+        _startup_warning = msg
 
 
 HTML = """<!DOCTYPE html>
@@ -682,4 +705,5 @@ def api_stop():
 
 
 if __name__ == "__main__":
+    _auto_migrate()
     uvicorn.run(app, host="127.0.0.1", port=8001, log_level="warning")

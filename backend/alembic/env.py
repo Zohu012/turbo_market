@@ -1,9 +1,14 @@
 import os
 from logging.config import fileConfig
+from pathlib import Path
 
+from dotenv import load_dotenv
 from sqlalchemy import engine_from_config, pool
 
 from alembic import context
+
+# Load backend/.env so alembic picks up SYNC_DATABASE_URL the same way the app does
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 # Import all models so metadata is populated
 from app.database import Base
@@ -11,9 +16,11 @@ import app.models  # noqa: F401
 
 config = context.config
 
-# Override sqlalchemy.url from environment if set
+# Override sqlalchemy.url from environment if set (strip SQLAlchemy driver prefix so
+# plain psycopg2 works regardless of how the URL is written)
 sync_url = os.environ.get("SYNC_DATABASE_URL")
 if sync_url:
+    sync_url = sync_url.replace("postgresql+psycopg2://", "postgresql://")
     config.set_main_option("sqlalchemy.url", sync_url)
 
 if config.config_file_name is not None:
