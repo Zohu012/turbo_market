@@ -46,7 +46,7 @@ log = logging.getLogger(__name__)
 from app.scraper.browser import BrowserManager
 from app.scraper.listing_scraper import get_all_makes, scrape_make_pages
 from app.scraper.detail_scraper import scrape_detail
-from app.scraper.pipeline import get_sync_conn, upsert_listing, update_vehicle_detail
+from app.scraper.pipeline import get_sync_conn, upsert_listing, update_vehicle_detail, mark_delisted
 from app.scraper.lifecycle import run_lifecycle_check_sync
 
 
@@ -196,7 +196,10 @@ def run(
                     try:
                         detail = scrape_detail(detail_page, url)
                         if detail:
-                            update_vehicle_detail(conn, vehicle_id, detail)
+                            if detail.get("delisted"):
+                                mark_delisted(conn, vehicle_id)
+                            else:
+                                update_vehicle_detail(conn, vehicle_id, detail)
                     except Exception as e:
                         log.warning(f"  Detail fetch failed for {url}: {e}")
             finally:
