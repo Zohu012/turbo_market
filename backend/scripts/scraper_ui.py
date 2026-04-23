@@ -528,6 +528,7 @@ def api_inspect(url: str):
 
     browser = BrowserManager()
     browser.start()
+    page = None
     try:
         page = browser.new_page()
         try:
@@ -636,16 +637,17 @@ def api_inspect(url: str):
                             db_error = "could not extract turbo_id from URL"
                         else:
                             result = upsert_listing(conn, listing)
-                            # upsert_listing returns (vehicle_id, action, price_changed)
-                            if isinstance(result, tuple):
+                            # upsert_listing returns (vehicle_id, action, price_changed, needs_detail)
+                            if isinstance(result, tuple) and result and result[0] is not None:
                                 vehicle_id = result[0]
-                            update_vehicle_detail(conn, vehicle_id, detail)
-                            conn.commit()
-                            db_action = "inserted"
+                                update_vehicle_detail(conn, vehicle_id, detail)
+                                conn.commit()
+                                db_action = "inserted"
+                            else:
+                                db_error = f"upsert_listing returned unexpected value: {result!r}"
             except Exception as e:
                 db_error = f"db upsert failed: {e}"
 
-        browser.close_page(page)
         return {
             "url": url,
             "db_action": db_action,
@@ -658,6 +660,11 @@ def api_inspect(url: str):
             "seller_container": seller_html,
         }
     finally:
+        if page is not None:
+            try:
+                browser.close_page(page)
+            except Exception:
+                pass
         browser.stop()
 
 
