@@ -137,17 +137,19 @@ def run(
                             -1,
                         )
                         if idx >= 0:
-                            skipped = idx + 1
-                            makes = makes[skipped:]
                             if resume_from_page > 1:
+                                # Make was interrupted mid-scrape — include it, start from saved page.
+                                makes = makes[idx:]
                                 log.info(
                                     f"Resuming '{last_make}' from page {resume_from_page} — "
-                                    f"skipping {skipped} already-done makes"
+                                    f"skipping {idx} already-done makes, {len(makes)} remaining"
                                 )
                             else:
+                                # Make completed cleanly — skip it entirely.
+                                makes = makes[idx + 1:]
                                 log.info(
-                                    f"Resuming after last completed make '{last_make}' — "
-                                    f"skipping {skipped} already-done, {len(makes)} remaining"
+                                    f"Resuming after completed make '{last_make}' — "
+                                    f"skipping {idx + 1} already-done, {len(makes)} remaining"
                                 )
                         else:
                             log.warning(
@@ -171,7 +173,7 @@ def run(
                         upsert_listing(conn, v)
                     committed["n"] += len(vehicles_on_page)
                     current_page["num"] = page_num
-                    if not target_make and page_num > resume_from_page:
+                    if not target_make:
                         save_checkpoint(make["name"], page_num)
 
                 try:
