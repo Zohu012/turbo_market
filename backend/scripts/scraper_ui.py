@@ -547,7 +547,7 @@ def api_inspect(url: str):
 
     from app.scraper.browser import BrowserManager
     from app.scraper.detail_scraper import _parse_seller, scrape_detail
-    from app.scraper.pipeline import upsert_listing, update_vehicle_detail
+    from app.scraper.pipeline import upsert_listing, update_vehicle_detail, mark_delisted
 
     browser = BrowserManager()
     browser.start()
@@ -648,7 +648,15 @@ def api_inspect(url: str):
                         )
                         existing = cur.fetchone()
 
-                    if existing:
+                    is_delisted = detail.get("delisted", False)
+                    if is_delisted:
+                        if existing:
+                            vehicle_id = existing[0]
+                            mark_delisted(conn, vehicle_id)
+                            db_action = "marked_delisted"
+                        else:
+                            db_action = "skipped_delisted"
+                    elif existing:
                         vehicle_id = existing[0]
                         update_vehicle_detail(conn, vehicle_id, detail)
                         conn.commit()
@@ -671,11 +679,27 @@ def api_inspect(url: str):
             except Exception as e:
                 db_error = f"db upsert failed: {e}"
 
+        dt = detail.get("date_updated_turbo")
         return {
             "url": url,
+            "is_delisted": detail.get("delisted", False),
             "db_action": db_action,
             "db_error": db_error,
             "vehicle_id": vehicle_id,
+            "parsed_detail": {
+                "labels": detail.get("labels", []),
+                "features": detail.get("features", []),
+                "fuel_type": detail.get("fuel_type"),
+                "hp": detail.get("hp"),
+                "vin": detail.get("vin"),
+                "view_count_scraped": detail.get("view_count_scraped"),
+                "date_updated_turbo": str(dt) if dt else None,
+                "condition": detail.get("condition"),
+                "market_for": detail.get("market_for"),
+                "is_on_order": detail.get("is_on_order"),
+                "price": detail.get("price"),
+                "currency": detail.get("currency"),
+            },
             "tel_hrefs_site_wide": tel_hrefs_all,
             "tel_hrefs_scoped_before_click": tel_hrefs_scoped_before,
             "tel_hrefs_scoped_after_click": tel_hrefs_scoped_after,
