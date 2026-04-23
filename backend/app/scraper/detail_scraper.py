@@ -183,8 +183,23 @@ def scrape_detail(page: Page, url: str) -> dict:
 
     # Cheap delisted check up front — skips all the parsing below if the
     # listing has been removed. Caller will preserve existing DB data.
+    # Exception: turbo.az still shows the view count on delisted pages, so
+    # pull it from the statistics strip to give lifecycle a final VC snapshot.
     if _detect_delisted(page):
-        return {"delisted": True}
+        result: dict = {"delisted": True}
+        try:
+            stat_texts = page.eval_on_selector_all(
+                ".product-statistics__i-text",
+                "els => els.map(e => e.textContent.trim())",
+            )
+            for text in stat_texts:
+                m = re.search(r"baxışların sayı:\s*(\d+)", text, re.IGNORECASE)
+                if m:
+                    result["view_count_scraped"] = int(m.group(1))
+                    break
+        except Exception:
+            pass
+        return result
 
     data: dict = {}
 

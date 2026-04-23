@@ -66,6 +66,10 @@ class Vehicle(Base):
     days_to_sell: Mapped[Optional[int]] = mapped_column(Integer)
     active_days_accumulated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
+    # Two-miss sold detection: bumped each full scan a listing is absent,
+    # reset to 0 when it reappears. Deactivation only fires at >= 2.
+    missing_scan_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
     seller_id: Mapped[Optional[int]] = mapped_column(
         BigInteger, ForeignKey("sellers.id", ondelete="SET NULL")
     )

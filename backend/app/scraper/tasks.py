@@ -169,7 +169,11 @@ def lifecycle_check_task(self, results: list[dict], job_id: Optional[int] = None
             total_updated += r.get("updated", 0)
 
     conn = get_sync_conn()
-    deactivated = run_lifecycle_check_sync(conn, live_ids)
+    # Celery path has no browser handy — skip the final-VC snapshot in
+    # lifecycle step 2. Two-miss deactivation still runs via step 3.
+    # The local path (scripts/run_local.py) passes the detail tab through
+    # so every listing gets the full 3-snapshot VC capture.
+    deactivated = run_lifecycle_check_sync(conn, live_ids, detail_page=None)
     try:
         # Re-derive shop/dealer/private classification from the new state of
         # the world. Cheap — three bulk UPDATEs, one pass per scrape.

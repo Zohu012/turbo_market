@@ -160,6 +160,9 @@ def upsert_listing(
             "odometer": vehicle.get("odometer"),
             "odometer_type": vehicle.get("odometer_type"),
             "date_updated": now,
+            # Card is present → this listing is still live → reset the miss
+            # counter used by two-miss sold detection in lifecycle.py.
+            "missing_scan_count": 0,
             **extra,
         }
         if listing_dt is not None:
@@ -309,6 +312,51 @@ def update_vehicle_detail(conn: PGConnection, vehicle_id: int, detail: dict):
         _replace_m2m(cur, vehicle_id, detail.get("features", []), "features", "vehicle_features", "feature_id")
         _replace_m2m(cur, vehicle_id, detail.get("labels", []), "labels", "vehicle_labels", "label_id")
 
+        conn.commit()
+
+
+def persist_view_count(
+    conn: PGConnection, vehicle_id: int, scraped_vc: Optional[int]
+) -> None:
+    """
+    Persist a scraped view count with cumulative-across-relistings bookkeeping.
+
+    Extracted from update_vehicle_detail so lifecycle can capture a final VC
+    snapshot on delisting WITHOUT triggering the full detail-update path
+    (which wipes M2M rows and raw_detail_json when called with a minimal dict).
+    """
+    if scraped_vc is None:
+        return
+
+    now = datetime.now(timezone.utc)
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT view_count_base, last_scraped_view_count "
+            "FROM vehicles WHERE id = %s",
+            (vehicle_id,),
+        )
+        row = cur.fetchone() or {}
+        base = row.get("view_count_base") or 0
+        last_scraped = row.get("last_scraped_view_count")
+
+        # Reset detection (raw number went DOWN on a repost): fold prior
+        # value into the base and archive it to view_count_history.
+        if last_scraped is not None and scraped_vc < last_scraped:
+            cur.execute(
+                "INSERT INTO view_count_history (vehicle_id, view_count, recorded_at) "
+                "VALUES (%s, %s, %s)",
+                (vehicle_id, last_scraped, now),
+            )
+            base = base + last_scraped
+
+        effective_vc = base + scraped_vc
+        cur.execute(
+            "UPDATE vehicles "
+            "SET view_count_base = %s, last_scraped_view_count = %s, "
+            "    view_count = %s "
+            "WHERE id = %s",
+            (base, scraped_vc, effective_vc, vehicle_id),
+        )
         conn.commit()
 
 

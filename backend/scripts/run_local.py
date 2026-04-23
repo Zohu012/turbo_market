@@ -200,20 +200,24 @@ def run(
         else:
             log.info("Phase 1 skipped (--details-only)")
 
-        # ── Phase 2: detail pages (driven by DB state — auto-resumable) ──────
-        if skip_details:
-            log.info("Phase 2 skipped (--skip-details)")
-        else:
-            pending = fetch_pending_details(conn, target_make)
-            log.info(f"Phase 2: {len(pending)} vehicles pending details")
+        # ── Detail browser tab — reused across Phase 2 and Phase 3 ───────────
+        # One persistent tab preserves the Cloudflare session (one solved
+        # challenge = all subsequent navigations clean). Phase 3 also uses it
+        # to capture a final view-count snapshot on two-miss deactivations.
+        do_lifecycle = (
+            not target_make and not details_only and not skip_lifecycle
+        )
+        need_detail_tab = (not skip_details) or do_lifecycle
+        detail_page = browser.new_page() if need_detail_tab else None
 
-            # Reuse ONE detail page for the whole phase — opening a fresh
-            # tab per vehicle defeats Cloudflare session reuse and makes
-            # manual checkbox clicks useless (user clicks one tab, next
-            # URL opens a different tab). One persistent tab means one
-            # solved challenge = all subsequent navigations clean.
-            detail_page = browser.new_page()
-            try:
+        try:
+            # ── Phase 2: detail pages (driven by DB state — auto-resumable) ──
+            if skip_details:
+                log.info("Phase 2 skipped (--skip-details)")
+            else:
+                pending = fetch_pending_details(conn, target_make)
+                log.info(f"Phase 2: {len(pending)} vehicles pending details")
+
                 for i, (vehicle_id, url) in enumerate(pending, 1):
                     if i % 50 == 0 or i == len(pending):
                         log.info(f"  Details: {i}/{len(pending)}")
@@ -226,27 +230,30 @@ def run(
                                 update_vehicle_detail(conn, vehicle_id, detail)
                     except Exception as e:
                         log.warning(f"  Detail fetch failed for {url}: {e}")
-            finally:
-                browser.close_page(detail_page)
 
-            # Completion check — how many still un-detailed after the run?
-            remaining = fetch_pending_details(conn, target_make)
-            if remaining:
-                log.warning(
-                    f"Phase 2 done — {len(remaining)} vehicles still missing details "
-                    f"(likely detail-page failures; re-run to retry)"
-                )
+                # Completion check — how many still un-detailed after the run?
+                remaining = fetch_pending_details(conn, target_make)
+                if remaining:
+                    log.warning(
+                        f"Phase 2 done — {len(remaining)} vehicles still missing details "
+                        f"(likely detail-page failures; re-run to retry)"
+                    )
+                else:
+                    log.info("Phase 2 done — all active vehicles have detail data")
+
+            # ── Phase 3: lifecycle check (only on full scan) ─────────────────
+            if not do_lifecycle:
+                if skip_lifecycle:
+                    log.info("Phase 3 skipped (--skip-lifecycle)")
             else:
-                log.info("Phase 2 done — all active vehicles have detail data")
-
-        # ── Phase 3: lifecycle check (only on full scan) ─────────────────────
-        if target_make or details_only or skip_lifecycle:
-            if skip_lifecycle:
-                log.info("Phase 3 skipped (--skip-lifecycle)")
-        else:
-            log.info(f"Phase 3: lifecycle check on {len(live_ids)} live IDs...")
-            deactivated = run_lifecycle_check_sync(conn, live_ids)
-            log.info(f"Deactivated {deactivated} sold/removed vehicles")
+                log.info(f"Phase 3: lifecycle check on {len(live_ids)} live IDs...")
+                deactivated = run_lifecycle_check_sync(
+                    conn, live_ids, detail_page=detail_page
+                )
+                log.info(f"Deactivated {deactivated} sold/removed vehicles")
+        finally:
+            if detail_page is not None:
+                browser.close_page(detail_page)
 
         log.info("=== Scan complete ===")
 
