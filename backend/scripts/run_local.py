@@ -53,15 +53,24 @@ from app.scraper.lifecycle import run_lifecycle_check_sync
 CHECKPOINT_FILE = Path(__file__).parent.parent / "scraper_checkpoint.txt"
 
 
-def load_checkpoint() -> str | None:
+def load_checkpoint() -> tuple[str | None, int]:
+    """Load checkpoint. Returns (make_name, start_page) or (None, 1) if no checkpoint."""
     if CHECKPOINT_FILE.exists():
-        name = CHECKPOINT_FILE.read_text(encoding="utf-8").strip()
-        return name or None
-    return None
+        text = CHECKPOINT_FILE.read_text(encoding="utf-8").strip()
+        if text:
+            parts = text.split(":")
+            if len(parts) == 2 and parts[1].isdigit():
+                return parts[0], int(parts[1])
+            return text, 1
+    return None, 1
 
 
-def save_checkpoint(make_name: str) -> None:
-    CHECKPOINT_FILE.write_text(make_name, encoding="utf-8")
+def save_checkpoint(make_name: str, page_num: int = None) -> None:
+    """Save checkpoint as 'make_name' or 'make_name:page_num' if page provided."""
+    if page_num:
+        CHECKPOINT_FILE.write_text(f"{make_name}:{page_num}", encoding="utf-8")
+    else:
+        CHECKPOINT_FILE.write_text(make_name, encoding="utf-8")
 
 
 def clear_checkpoint() -> None:
@@ -117,34 +126,43 @@ def run(
                     return
             else:
                 makes = all_makes
+                resume_from_page = 1
                 if fresh:
                     clear_checkpoint()
                 else:
-                    last = load_checkpoint()
-                    if last:
+                    last_make, resume_from_page = load_checkpoint()
+                    if last_make:
                         idx = next(
-                            (i for i, m in enumerate(makes) if m["name"] == last),
+                            (i for i, m in enumerate(makes) if m["name"] == last_make),
                             -1,
                         )
                         if idx >= 0:
                             skipped = idx + 1
                             makes = makes[skipped:]
-                            log.info(
-                                f"Resuming after last completed make '{last}' — "
-                                f"skipping {skipped} already-done, {len(makes)} remaining"
-                            )
+                            if resume_from_page > 1:
+                                log.info(
+                                    f"Resuming '{last_make}' from page {resume_from_page} — "
+                                    f"skipping {skipped} already-done makes"
+                                )
+                            else:
+                                log.info(
+                                    f"Resuming after last completed make '{last_make}' — "
+                                    f"skipping {skipped} already-done, {len(makes)} remaining"
+                                )
                         else:
                             log.warning(
-                                f"Checkpoint make '{last}' not in current list — ignoring"
+                                f"Checkpoint make '{last_make}' not in current list — ignoring"
                             )
+                            resume_from_page = 1
 
             log.info(f"Phase 1: scanning {len(makes)} make(s)")
 
             for make in makes:
                 log.info(f"[make] {make['name']}")
                 committed = {"n": 0}
+                current_page = {"num": resume_from_page}
 
-                def _commit_page(vehicles_on_page):
+                def _commit_page(vehicles_on_page, page_num):
                     # Per-page commit — preserves earlier pages if a later
                     # page times out. Counter is closed-over so we can log
                     # how many were saved even if the make errors out.
@@ -152,10 +170,13 @@ def run(
                         live_ids.add(v["turbo_id"])
                         upsert_listing(conn, v)
                     committed["n"] += len(vehicles_on_page)
+                    current_page["num"] = page_num
+                    if not target_make and page_num > resume_from_page:
+                        save_checkpoint(make["name"], page_num)
 
                 try:
                     vehicles = scrape_make_pages(
-                        page, make, on_page_complete=_commit_page
+                        page, make, start_page=resume_from_page, on_page_complete=_commit_page
                     )
                     log.info(
                         f"  {make['name']}: {len(vehicles)} found, "
@@ -163,13 +184,14 @@ def run(
                     )
                 except Exception as e:
                     log.error(
-                        f"  {make['name']} failed after committing "
-                        f"{committed['n']} vehicles: {e}"
+                        f"  {make['name']} failed after page {current_page['num']}, "
+                        f"committed {committed['n']} vehicles: {e}"
                     )
                     continue
                 finally:
                     if not target_make:
                         save_checkpoint(make["name"])
+                    resume_from_page = 1
 
             if not target_make:
                 clear_checkpoint()

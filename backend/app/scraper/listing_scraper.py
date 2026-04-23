@@ -295,7 +295,7 @@ def scrape_make_pages(
     Scrape all listing pages for a single make.
     Returns flat list of vehicle dicts from listing cards.
     Calls progress_callback(page_num, total_pages, new_on_page) if provided.
-    Calls on_page_complete(vehicles_on_page) after each page is parsed — use
+    Calls on_page_complete(vehicles_on_page, page_num) after each page is parsed — use
     this to commit per-page to DB so a later timeout doesn't lose earlier pages.
     """
     make_url = f"{AUTOS_URL}?q[make][]={make['id']}"
@@ -326,7 +326,7 @@ def scrape_make_pages(
         # because page 85 timed out was the old bug).
         if on_page_complete:
             try:
-                on_page_complete(vehicles)
+                on_page_complete(vehicles, page_num)
             except Exception as e:
                 log.error(f"  {make['name']} p{page_num}: on_page_complete raised: {e}")
 
