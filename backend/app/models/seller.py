@@ -21,6 +21,7 @@ class Seller(Base):
     # 'private'  = everyone else
     seller_type: Mapped[Optional[str]] = mapped_column(String(20))
     city: Mapped[Optional[str]] = mapped_column(String(100))
+    address: Mapped[Optional[str]] = mapped_column(String(500))
     profile_url: Mapped[Optional[str]] = mapped_column(String(500))
     regdate: Mapped[Optional[date]] = mapped_column(Date)
     first_seen: Mapped[datetime] = mapped_column(

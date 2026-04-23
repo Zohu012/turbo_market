@@ -72,6 +72,26 @@ def parse_engine(raw: Optional[str]) -> tuple[Optional[str], Optional[int], Opti
     return engine_volume, hp, fuel_type
 
 
+def parse_seller_location(raw: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """
+    Split a turbo.az shop location string into (city, address).
+
+    Rules (in order):
+      - "Bakı ş., Nərimanov r., küç., 16" → city="Bakı", address="Nərimanov r., küç., 16"
+      - "Nizami r., Babək pr., 74a"       → city="Bakı",  address=whole string
+      - "Bakı" or any other text          → city=whole,   address=None
+    """
+    if not raw:
+        return None, None
+    raw = raw.strip()
+    m = re.match(r"^(.+?)\s+ş\.,\s*(.+)$", raw)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    if "r.," in raw:
+        return "Bakı", raw
+    return raw, None
+
+
 _DATE_DDMMYYYY = re.compile(r"(\d{2})\.(\d{2})\.(\d{4})")
 
 
@@ -213,6 +233,7 @@ def scrape_detail(page: Page, url: str) -> dict:
         data["market_for"] = _find(
             specs, ["hansı bazar üçün yığılıb", "market", "рынок"]
         )
+        data["city"] = _find(specs, ["şəhər", "city", "город", "şehər"])
 
         # Engine → (volume, hp, fuel_type). Keep the raw engine text too
         # (existing `engine` column holds the string form for display).
@@ -549,7 +570,6 @@ def _parse_seller(page: Page) -> dict:
     # Shop / on-order block (also sets regdate if private block was absent)
     for sel, key in [
         (".product-shop__owner-name", "name"),
-        (".product-shop__location a", "city"),
         (".product-shop__regdate", "regdate_raw"),
     ]:
         if seller.get(key):
@@ -562,6 +582,21 @@ def _parse_seller(page: Page) -> dict:
                     seller[key] = txt
         except Exception:
             continue
+
+    # Shop location → split into city + address
+    if not seller.get("city"):
+        try:
+            el = page.query_selector(".product-shop__location a")
+            if el:
+                loc_txt = (el.inner_text() or "").strip()
+                if loc_txt:
+                    city, address = parse_seller_location(loc_txt)
+                    if city:
+                        seller["city"] = city
+                    if address:
+                        seller["address"] = address
+        except Exception:
+            pass
 
     # Normalize regdate: "Satıcı 12.2025 tarixindən..." → date(2025, 12, 1)
     regdate = parse_regdate(seller.pop("regdate_raw", None))

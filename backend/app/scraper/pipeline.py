@@ -400,7 +400,7 @@ def upsert_seller(conn: PGConnection, seller: dict) -> Optional[int]:
 
         if seller_id is not None:
             updates = {"last_seen": now}
-            for k in ("name", "seller_type", "city", "profile_url", "regdate"):
+            for k in ("name", "seller_type", "city", "address", "profile_url", "regdate"):
                 v = seller.get(k)
                 if v:
                     updates[k] = v
@@ -415,9 +415,9 @@ def upsert_seller(conn: PGConnection, seller: dict) -> Optional[int]:
             cur.execute(
                 """
                 INSERT INTO sellers
-                  (turbo_seller_id, name, seller_type, city, profile_url,
+                  (turbo_seller_id, name, seller_type, city, address, profile_url,
                    regdate, first_seen, last_seen, total_listings)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1)
                 RETURNING id
                 """,
                 (
@@ -425,6 +425,7 @@ def upsert_seller(conn: PGConnection, seller: dict) -> Optional[int]:
                     seller.get("name"),
                     seller.get("seller_type"),
                     seller.get("city"),
+                    seller.get("address"),
                     seller.get("profile_url"),
                     seller.get("regdate"),
                     now,
