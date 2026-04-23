@@ -17,6 +17,7 @@ from app.scraper.listing_scraper import (
     wait_for_cloudflare,
     to_price_azn,
     parse_price,
+    parse_engine_cc,
 )
 
 log = logging.getLogger(__name__)
@@ -219,7 +220,7 @@ def scrape_detail(page: Page, url: str) -> dict:
             specs, ["mühərrik", "engine", "двигатель"]
         )
         engine_volume, hp, fuel_from_engine = parse_engine(engine_raw)
-        data["engine"] = engine_raw
+        data["engine"] = parse_engine_cc(engine_raw)
         data["engine_volume"] = engine_volume
         data["hp"] = hp
 

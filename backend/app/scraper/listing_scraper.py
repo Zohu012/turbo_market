@@ -116,6 +116,27 @@ def parse_odometer(text: str) -> tuple[Optional[int], Optional[str]]:
     return None, None
 
 
+def parse_engine_cc(text: Optional[str]) -> Optional[int]:
+    """
+    Extract engine displacement in cubic centimeters.
+      "3.4 L / 409 a.g. / Hibrid" -> 3400
+      "1.5 L"                     -> 1500
+      "2500 sm³"                  -> 2500
+      "Elektro"                   -> None
+    """
+    if not text:
+        return None
+    # Liters: "3.4 L" -> 3400. \bL\b avoids matching "LPG" etc.
+    m = re.search(r"(\d+(?:[.,]\d+)?)\s*L\b", text, re.IGNORECASE)
+    if m:
+        return int(round(float(m.group(1).replace(",", ".")) * 1000))
+    # Already cc: "2500 sm³" / "2500 cc" / "2500 см³"
+    m = re.search(r"(\d{3,5})\s*(?:cc|sm[³3]|см[³3])", text, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    return None
+
+
 def to_price_azn(price: Optional[int], currency: Optional[str]) -> Optional[float]:
     if price is None:
         return None
@@ -205,7 +226,7 @@ def parse_listing_page(page: Page) -> list[dict]:
             "price_azn": to_price_azn(price_val, currency),
             "odometer": odo_val,
             "odometer_type": odo_type,
-            "engine": engine,
+            "engine": parse_engine_cc(engine),
             "url": url,
             "date_updated_turbo": parse_listing_datetime(c["dt"]),
         })
