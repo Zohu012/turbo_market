@@ -2,7 +2,7 @@ from datetime import datetime, date
 from typing import Optional
 
 from sqlalchemy import (
-    BigInteger, Boolean, ForeignKey, Index, Integer, Numeric,
+    BigInteger, Boolean, Computed, ForeignKey, Index, Integer, Numeric,
     SmallInteger, String, Text, TIMESTAMP, Date, func
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -50,6 +50,7 @@ class Vehicle(Base):
     url: Mapped[str] = mapped_column(Text, nullable=False)
 
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active", index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, Computed("status = 'active'", persisted=True))
     date_added: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )
