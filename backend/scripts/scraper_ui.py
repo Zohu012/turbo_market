@@ -185,8 +185,12 @@ async function refreshStatus() {
       } catch (e) {}
     }
     const logEl = $('log');
-    logEl.innerHTML = lines.map(colorize).join('');
-    if (autoscroll) logEl.scrollTop = logEl.scrollHeight;
+    if (lines.length > 0) {
+      logEl.innerHTML = lines.map(colorize).join('');
+      if (autoscroll) logEl.scrollTop = logEl.scrollHeight;
+    } else if (!s.running) {
+      logEl.textContent = 'No log yet — start a scan to see output.';
+    }
   } catch (e) {
     console.error(e);
   }
@@ -196,6 +200,15 @@ async function loadMakes() {
   try {
     const r = await api('/api/makes');
     const sel = $('make-select');
+    if (r.error) {
+      sel.innerHTML = `<option value="">(DB error: ${r.error.slice(0, 60)})</option>`;
+      console.error('makes error:', r.error);
+      return;
+    }
+    if (!r.makes.length) {
+      sel.innerHTML = '<option value="">(no vehicles in DB yet)</option>';
+      return;
+    }
     sel.innerHTML = '<option value="">— select make —</option>' +
       r.makes.map(m => `<option value="${m}">${m}</option>`).join('');
   } catch (e) {
