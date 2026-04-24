@@ -10,6 +10,8 @@ Run from the backend/ directory:
     python scripts/run_local.py --details-only   # skip Phase 1, only fetch missing details
     python scripts/run_local.py --skip-details   # only Phase 1 (listings), no detail pages
     python scripts/run_local.py --skip-lifecycle # no sold/removed deactivation
+    python scripts/run_local.py --inactive-details              # backfill specs for inactive rows with null details
+    python scripts/run_local.py --inactive-details --delete-unscrapable  # also delete rows whose pages are gone
 
 Staged flow (full scan):
   Phase 1  Listing scan. upsert_listing stamps every sighted card with
@@ -159,6 +161,37 @@ def clear_detail_checkpoint() -> None:
     _write_checkpoint_lines(data)
 
 
+def fetch_inactive_pending_details(conn, target_make: str = None) -> list[tuple[int, str]]:
+    """Inactive vehicles that never got a detail-page fetch (raw_detail_json IS NULL).
+    These were typically deactivated via two-miss before their detail tab was visited.
+    """
+    sql = (
+        "SELECT id, url FROM vehicles "
+        "WHERE status = 'inactive' AND raw_detail_json IS NULL"
+    )
+    params: tuple = ()
+    if target_make:
+        sql += " AND LOWER(make) = LOWER(%s)"
+        params = (target_make,)
+    sql += " ORDER BY id"
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return [(row[0], row[1]) for row in cur.fetchall()]
+
+
+def delete_vehicles_by_ids(conn, vehicle_ids: list[int]) -> int:
+    if not vehicle_ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM vehicles WHERE id = ANY(%s)",
+            (vehicle_ids,),
+        )
+        deleted = cur.rowcount
+    conn.commit()
+    return deleted
+
+
 def fetch_pending_details(conn, target_make: str = None) -> list[tuple[int, str]]:
     """Vehicles that still need a detail-page fetch — active rows with no
     raw_detail_json yet. Used by --details-only and as a safety backstop so
@@ -178,17 +211,118 @@ def fetch_pending_details(conn, target_make: str = None) -> list[tuple[int, str]
         return [(row[0], row[1]) for row in cur.fetchall()]
 
 
+def _run_inactive_details(
+    browser: "BrowserManager",
+    conn,
+    target_make: str = None,
+    delete_unscrapable: bool = False,
+) -> None:
+    """Backfill detail pages for inactive vehicles that have raw_detail_json IS NULL.
+
+    These are vehicles deactivated via two-miss before their detail tab was ever
+    visited. Their turbo.az pages may still be accessible briefly after removal.
+
+    - Page still live → update_vehicle_detail fills in specs (status stays inactive).
+    - Page gone (delisted flag) → kept as-is, OR deleted if --delete-unscrapable.
+
+    Uses the same file-based checkpoint as --details-only (detail:vehicle_id line)
+    so a crash can resume from the last processed vehicle.
+    """
+    rows = fetch_inactive_pending_details(conn, target_make)
+    if not rows:
+        log.info("--inactive-details: no inactive vehicles with missing details. Nothing to do.")
+        return
+
+    # Resume from checkpoint
+    last_id = load_detail_checkpoint()
+    if last_id is not None:
+        before = len(rows)
+        rows = [(vid, url) for vid, url in rows if vid > last_id]
+        skipped = before - len(rows)
+        if skipped:
+            log.info(
+                f"--inactive-details: resuming from checkpoint "
+                f"(last id={last_id}, skipping {skipped} already-done)"
+            )
+
+    log.info(f"--inactive-details: {len(rows)} inactive vehicle(s) to process")
+    detail_page = browser.new_page()
+
+    recovered = 0
+    still_gone: list[int] = []
+
+    try:
+        total = len(rows)
+        for i, (vehicle_id, url) in enumerate(rows, 1):
+            if i % 50 == 0 or i == total:
+                log.info(f"  Inactive details: {i}/{total}")
+            try:
+                detail = scrape_detail(detail_page, url)
+            except Exception as e:
+                log.warning(f"  Detail fetch failed for {url}: {e}")
+                continue
+
+            if not detail:
+                continue
+
+            if detail.get("delisted"):
+                still_gone.append(vehicle_id)
+            else:
+                try:
+                    update_vehicle_detail(conn, vehicle_id, detail)
+                    recovered += 1
+                except Exception as e:
+                    log.warning(f"  update_vehicle_detail failed for vehicle {vehicle_id}: {e}")
+                    continue
+
+            save_detail_checkpoint(vehicle_id)
+
+    finally:
+        browser.close_page(detail_page)
+
+    clear_detail_checkpoint()
+
+    log.info(
+        f"--inactive-details: recovered={recovered}, "
+        f"still gone (page delisted)={len(still_gone)}"
+    )
+
+    if delete_unscrapable and still_gone:
+        deleted = delete_vehicles_by_ids(conn, still_gone)
+        log.info(
+            f"--inactive-details --delete-unscrapable: deleted {deleted} "
+            f"vehicle(s) whose pages were already gone"
+        )
+    elif still_gone:
+        log.info(
+            f"  {len(still_gone)} vehicle(s) had no recoverable page. "
+            f"Re-run with --delete-unscrapable to remove them."
+        )
+
+
 def run(
     target_make: str = None,
     fresh: bool = False,
     details_only: bool = False,
     skip_details: bool = False,
     skip_lifecycle: bool = False,
+    inactive_details: bool = False,
+    delete_unscrapable: bool = False,
 ):
     log.info("=== turbo_market local scraper starting ===")
     browser = BrowserManager()
     browser.start()
     conn = get_sync_conn()
+
+    # ── --inactive-details: one-time backfill for inactive rows with no detail ─
+    # Runs standalone — skips all normal phases and session bookkeeping.
+    if inactive_details:
+        _run_inactive_details(
+            browser, conn, target_make=target_make, delete_unscrapable=delete_unscrapable
+        )
+        conn.close()
+        browser.stop()
+        return
 
     # ── Open session up-front so we have a canonical session_start to stamp
     # on every sighted card AND use as the Phase 2 classification threshold. ─
@@ -521,6 +655,22 @@ if __name__ == "__main__":
         action="store_true",
         help="Skip Phase 4 (sold/removed deactivation)",
     )
+    parser.add_argument(
+        "--inactive-details",
+        action="store_true",
+        help=(
+            "One-time backfill: fetch detail pages for inactive vehicles "
+            "with raw_detail_json IS NULL. Skips all other phases."
+        ),
+    )
+    parser.add_argument(
+        "--delete-unscrapable",
+        action="store_true",
+        help=(
+            "Used with --inactive-details: delete vehicles whose detail "
+            "page is already gone (delisted). Cleans up unrecoverable rows."
+        ),
+    )
     args = parser.parse_args()
 
     if args.headless:
@@ -532,4 +682,6 @@ if __name__ == "__main__":
         details_only=args.details_only,
         skip_details=args.skip_details,
         skip_lifecycle=args.skip_lifecycle,
+        inactive_details=args.inactive_details,
+        delete_unscrapable=args.delete_unscrapable,
     )
