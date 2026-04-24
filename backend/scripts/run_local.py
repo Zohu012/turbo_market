@@ -83,29 +83,80 @@ from app.scraper.lifecycle import (
 CHECKPOINT_FILE = Path(__file__).parent.parent / "scraper_checkpoint.txt"
 
 
+def _read_checkpoint_lines() -> dict[str, str]:
+    """Parse checkpoint file into a key→value dict.
+
+    Phase-1 line format:  ``make_name`` or ``make_name:page``  (key = "phase1")
+    Detail line format:   ``detail:vehicle_id``               (key = "detail")
+    """
+    result: dict[str, str] = {}
+    if not CHECKPOINT_FILE.exists():
+        return result
+    for raw in CHECKPOINT_FILE.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("detail:"):
+            result["detail"] = line[7:]
+        else:
+            result["phase1"] = line
+    return result
+
+
+def _write_checkpoint_lines(lines: dict[str, str]) -> None:
+    parts = []
+    if "phase1" in lines:
+        parts.append(lines["phase1"])
+    if "detail" in lines:
+        parts.append(f"detail:{lines['detail']}")
+    if parts:
+        CHECKPOINT_FILE.write_text("\n".join(parts), encoding="utf-8")
+    elif CHECKPOINT_FILE.exists():
+        CHECKPOINT_FILE.unlink()
+
+
 def load_checkpoint() -> tuple[str | None, int]:
-    """Load checkpoint. Returns (make_name, start_page) or (None, 1) if no checkpoint."""
-    if CHECKPOINT_FILE.exists():
-        text = CHECKPOINT_FILE.read_text(encoding="utf-8").strip()
-        if text:
-            parts = text.split(":")
-            if len(parts) == 2 and parts[1].isdigit():
-                return parts[0], int(parts[1])
-            return text, 1
+    """Load Phase-1 checkpoint. Returns (make_name, start_page) or (None, 1)."""
+    data = _read_checkpoint_lines()
+    val = data.get("phase1", "")
+    if val:
+        idx = val.rfind(":")
+        if idx > 0 and val[idx + 1:].isdigit():
+            return val[:idx], int(val[idx + 1:])
+        return val, 1
     return None, 1
 
 
 def save_checkpoint(make_name: str, page_num: int = None) -> None:
-    """Save checkpoint as 'make_name' or 'make_name:page_num' if page provided."""
-    if page_num:
-        CHECKPOINT_FILE.write_text(f"{make_name}:{page_num}", encoding="utf-8")
-    else:
-        CHECKPOINT_FILE.write_text(make_name, encoding="utf-8")
+    data = _read_checkpoint_lines()
+    data["phase1"] = f"{make_name}:{page_num}" if page_num else make_name
+    _write_checkpoint_lines(data)
 
 
 def clear_checkpoint() -> None:
-    if CHECKPOINT_FILE.exists():
-        CHECKPOINT_FILE.unlink()
+    """Clear Phase-1 checkpoint (preserves detail checkpoint if present)."""
+    data = _read_checkpoint_lines()
+    data.pop("phase1", None)
+    _write_checkpoint_lines(data)
+
+
+def load_detail_checkpoint() -> int | None:
+    """Return last successfully processed vehicle_id from a previous details run."""
+    val = _read_checkpoint_lines().get("detail", "")
+    return int(val) if val.isdigit() else None
+
+
+def save_detail_checkpoint(vehicle_id: int) -> None:
+    data = _read_checkpoint_lines()
+    data["detail"] = str(vehicle_id)
+    _write_checkpoint_lines(data)
+
+
+def clear_detail_checkpoint() -> None:
+    """Clear detail checkpoint (preserves Phase-1 checkpoint if present)."""
+    data = _read_checkpoint_lines()
+    data.pop("detail", None)
+    _write_checkpoint_lines(data)
 
 
 def fetch_pending_details(conn, target_make: str = None) -> list[tuple[int, str]]:
@@ -318,6 +369,24 @@ def run(
                 for vid, url in fetch_pending_details(conn, target_make):
                     to_fetch.setdefault(vid, url)
 
+            # ── Detail checkpoint resume (--details-only only) ───────────────
+            # fetch_pending_details is sorted by id, so filtering by
+            # last_detail_id gives a clean resume point. Not applied for full
+            # scans where to_fetch ordering is not strictly by id.
+            if details_only:
+                last_detail_id = load_detail_checkpoint()
+                if last_detail_id is not None:
+                    before = len(to_fetch)
+                    to_fetch = {vid: url for vid, url in to_fetch.items() if vid > last_detail_id}
+                    skipped = before - len(to_fetch)
+                    if skipped:
+                        log.info(
+                            f"Phase 3: resuming from detail checkpoint "
+                            f"(last id={last_detail_id}, skipping {skipped} already-done)"
+                        )
+            else:
+                last_detail_id = None
+
             if skip_details:
                 log.info("Phase 3 skipped (--skip-details)")
             elif not to_fetch:
@@ -368,6 +437,14 @@ def run(
                         # lag; defer to Phase 4's two-miss guard.
                         if vehicle_id in suspect_ids:
                             still_absent_not_delisted.append(vehicle_id)
+
+                    # Persist detail progress after every successful vehicle so
+                    # a crash can resume from this point on the next run.
+                    if details_only:
+                        save_detail_checkpoint(vehicle_id)
+
+                if details_only:
+                    clear_detail_checkpoint()
 
             # ── Phase 4: safety sweep (two-miss deactivation) ────────────────
             if not do_lifecycle:
