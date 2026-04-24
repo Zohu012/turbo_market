@@ -101,11 +101,33 @@ def fetch_detail(self, vehicle_id: int, url: str, job_id: Optional[int] = None):
 
 
 @celery_app.task(bind=True, max_retries=2)
-def scrape_make_task(self, make: dict, job_id: Optional[int] = None) -> dict:
-    """Scrape all listing pages for one make, upsert vehicles."""
+def scrape_make_task(
+    self,
+    make: dict,
+    job_id: Optional[int] = None,
+    session_start_iso: Optional[str] = None,
+) -> dict:
+    """Scrape all listing pages for one make, upsert vehicles.
+
+    `session_start_iso` (ISO-8601 string, serialisable through Celery) is the
+    started_at of the parent scrape_jobs row; used to stamp vehicles.last_seen_at
+    so Phase 2 classifier can identify cards absent from this run. If omitted,
+    upsert_listing falls back to now() and the last_seen_at stamp is still
+    useful, just not strictly session-aligned.
+    """
     browser = get_browser()
     page = browser.get_page()
     conn = get_sync_conn()
+
+    session_start = None
+    if session_start_iso:
+        try:
+            session_start = datetime.fromisoformat(session_start_iso)
+        except ValueError:
+            log.warning(
+                f"scrape_make_task: invalid session_start_iso={session_start_iso!r}; "
+                "falling back to now()"
+            )
 
     counters = {"found": 0, "new": 0, "updated": 0}
     live_ids: list[int] = []
@@ -116,7 +138,9 @@ def scrape_make_task(self, make: dict, job_id: Optional[int] = None) -> dict:
 
         for v in vehicles:
             live_ids.append(v["turbo_id"])
-            vehicle_id, action, _, needs_detail = upsert_listing(conn, v)
+            vehicle_id, action, _, needs_detail = upsert_listing(
+                conn, v, session_start=session_start
+            )
             if action == "new":
                 counters["new"] += 1
             elif action == "updated":
@@ -204,6 +228,16 @@ def daily_full_scan(self):
 
     conn = get_sync_conn()
     job_id = _create_job(conn, "full_scan", "scheduler", celery_task_id=self.request.id)
+    # Record a deterministic session_start for use as vehicles.last_seen_at
+    # by every chord worker. Also written back into scrape_jobs.started_at
+    # so the job row reflects the same instant.
+    session_start = datetime.now(timezone.utc)
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE scrape_jobs SET started_at = %s WHERE id = %s",
+            (session_start, job_id),
+        )
+    conn.commit()
     conn.close()
 
     browser = get_browser()
@@ -211,7 +245,10 @@ def daily_full_scan(self):
     makes = get_all_makes(page)
     log.info(f"daily_full_scan: found {len(makes)} makes, job_id={job_id}")
 
-    make_tasks = [scrape_make_task.s(make, job_id) for make in makes]
+    session_start_iso = session_start.isoformat()
+    make_tasks = [
+        scrape_make_task.s(make, job_id, session_start_iso) for make in makes
+    ]
     chord(make_tasks)(lifecycle_check_task.s(job_id))
 
 
@@ -235,5 +272,20 @@ def on_demand_scan(self, job_id: int, target_make: Optional[str] = None, target_
     else:
         makes = all_makes
 
-    make_tasks = [scrape_make_task.s(make, job_id) for make in makes]
+    # Stamp started_at on the job row so it matches the session_start the
+    # workers will use for last_seen_at bookkeeping.
+    session_start = datetime.now(timezone.utc)
+    conn = get_sync_conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE scrape_jobs SET started_at = %s WHERE id = %s",
+            (session_start, job_id),
+        )
+    conn.commit()
+    conn.close()
+
+    session_start_iso = session_start.isoformat()
+    make_tasks = [
+        scrape_make_task.s(make, job_id, session_start_iso) for make in makes
+    ]
     chord(make_tasks)(lifecycle_check_task.s(job_id))

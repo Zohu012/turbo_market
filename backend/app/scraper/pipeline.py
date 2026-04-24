@@ -27,10 +27,18 @@ def get_sync_conn() -> PGConnection:
 # ── Vehicle upsert ──────────────────────────────────────────────────────────────
 
 def upsert_listing(
-    conn: PGConnection, vehicle: dict
+    conn: PGConnection,
+    vehicle: dict,
+    session_start: Optional[datetime] = None,
 ) -> tuple[int, str, bool, bool]:
     """
     Insert or update a vehicle from listing card data.
+
+    `session_start` (optional): the started_at of the current scrape session.
+    When provided, `last_seen_at` is set to that value on both INSERT and UPDATE
+    paths so Phase 2 classification can identify rows absent from this session
+    via `last_seen_at < session_start`. Falls back to now() when omitted (keeps
+    callers that don't track sessions — e.g. Celery's scrape_make_task — working).
 
     Returns (vehicle_id, action, price_changed, needs_detail):
       action         = 'new' | 'updated' | 'unchanged'
@@ -40,6 +48,7 @@ def upsert_listing(
     """
     turbo_id = vehicle["turbo_id"]
     now = datetime.now(timezone.utc)
+    last_seen_stamp = session_start or now
     listing_dt = vehicle.get("date_updated_turbo")
 
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -63,16 +72,21 @@ def upsert_listing(
                   (turbo_id, make, model, year, price, currency, price_azn,
                    odometer, odometer_type, engine, url, status,
                    date_added, date_updated, date_updated_turbo,
-                   last_activated_at)
+                   last_activated_at, last_seen_at)
                 VALUES
                   (%(turbo_id)s, %(make)s, %(model)s, %(year)s, %(price)s,
                    %(currency)s, %(price_azn)s, %(odometer)s, %(odometer_type)s,
                    %(engine)s, %(url)s, 'active',
                    %(now)s, %(now)s, %(date_updated_turbo)s,
-                   %(now)s)
+                   %(now)s, %(last_seen_at)s)
                 RETURNING id
                 """,
-                {**vehicle, "now": now, "date_updated_turbo": listing_dt},
+                {
+                    **vehicle,
+                    "now": now,
+                    "date_updated_turbo": listing_dt,
+                    "last_seen_at": last_seen_stamp,
+                },
             )
             vehicle_id = cur.fetchone()["id"]
             conn.commit()
@@ -163,6 +177,9 @@ def upsert_listing(
             # Card is present → this listing is still live → reset the miss
             # counter used by two-miss sold detection in lifecycle.py.
             "missing_scan_count": 0,
+            # Per-session sighting stamp — Phase 2 classifier compares rows
+            # against session_start to find those absent from this run.
+            "last_seen_at": last_seen_stamp,
             **extra,
         }
         if listing_dt is not None:

@@ -70,6 +70,13 @@ class Vehicle(Base):
     # reset to 0 when it reappears. Deactivation only fires at >= 2.
     missing_scan_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
+    # Set to the current scrape session's started_at every time a listing card
+    # is observed. A delist-suspect is any active vehicle whose last_seen_at
+    # is older than the current session's start.
+    last_seen_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
     seller_id: Mapped[Optional[int]] = mapped_column(
         BigInteger, ForeignKey("sellers.id", ondelete="SET NULL")
     )
@@ -113,6 +120,7 @@ class Vehicle(Base):
         Index("idx_vehicles_seller_id", "seller_id"),
         Index("idx_vehicles_date_added", "date_added"),
         Index("idx_vehicles_date_updated_turbo", "date_updated_turbo"),
+        Index("idx_vehicles_last_seen_at", "last_seen_at"),
         Index("idx_vehicles_make_model_year_status", "make", "model", "year", "status"),
     )
 

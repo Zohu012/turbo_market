@@ -1,28 +1,26 @@
 """
-Lifecycle check — two-miss sold detection with final view-count capture.
+Lifecycle helpers — two-miss sold detection + bulk deactivation.
 
-After a listing scan collects all live turbo_ids, this module runs three steps:
+Two caller shapes use this module:
 
-  1. SQL: increment missing_scan_count for active vehicles absent from live_ids.
-  2. Python + browser: for every vehicle whose counter has reached >= 2,
-     fetch the detail page once to capture a final view-count snapshot
-     (turbo.az still displays the view count on delisted pages). If the
-     delisted marker is present, mark_delisted() finalises the row; otherwise
-     the bulk UPDATE in step 3 does.
-  3. SQL: flip status to 'inactive' for all remaining active rows at >= 2,
-     freezing days_to_sell.
+  (A) run_local.py (staged flow) — classifies delist-suspects up front via
+      last_seen_at, then confirms them in a unified Phase 3 detail loop. Phase 4
+      calls `increment_misses_for_ids(...)` for suspects that came back
+      not-delisted, then `run_safety_deactivate(...)` to bulk-flip any row at
+      >= 2 misses.
 
-Two-miss rule: a listing must be absent on two consecutive full scans before
-deactivation. Reset happens automatically in upsert_listing() whenever the
-card re-appears.
+  (B) tasks.py::lifecycle_check_task (Celery path) — receives a `live_ids` set
+      from the chord of per-make tasks; the classic "increment everything not
+      in live_ids, then deactivate" flow. Kept working by the legacy
+      `run_lifecycle_check_sync` wrapper below.
 
-Uses psycopg2 (sync) to stay consistent with the rest of the Celery pipeline
-and avoid asyncio.run() conflicts inside Celery chord callbacks.
+Reset happens automatically in upsert_listing() whenever a card reappears
+(missing_scan_count = 0 in its update_fields).
 """
 import logging
 from collections import Counter
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Sequence
 
 import psycopg2.extras
 from psycopg2.extensions import connection as PGConnection
@@ -33,43 +31,105 @@ from app.scraper.pipeline import mark_delisted, persist_view_count
 log = logging.getLogger(__name__)
 
 
-def run_lifecycle_check_sync(
-    conn: PGConnection,
-    live_ids: set[int],
-    detail_page=None,
+# ── Building-block helpers (used by the staged flow in run_local.py) ──────────
+
+def increment_misses_for_ids(
+    conn: PGConnection, vehicle_ids: Sequence[int]
 ) -> int:
-    """
-    Mark active vehicles not in live_ids as inactive, with two-miss protection
-    and a final view-count snapshot on deactivation.
+    """Bump `missing_scan_count` by 1 for the given active vehicle IDs.
 
-    If `detail_page` is None, step 2 is skipped — deactivations still happen
-    via step 3, but no final VC is captured. Callers that have a browser open
-    (run_local.py, tasks.lifecycle_check_task) should pass it through.
-
-    Returns the total number of newly-deactivated vehicles.
+    Callers should pass only vehicles that were *suspect* in this session and
+    *failed* the delisted confirmation (i.e. detail page was reachable and
+    didn't show the delisted marker). Idempotent per session: the caller is
+    expected to call this once per session for the relevant ids.
     """
-    if not live_ids:
-        log.warning(
-            "lifecycle_check: live_ids is empty — skipping to avoid mass deactivation"
-        )
+    if not vehicle_ids:
         return 0
+    now = datetime.now(timezone.utc)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE vehicles
+               SET missing_scan_count = missing_scan_count + 1,
+                   date_updated = %s
+             WHERE id = ANY(%s)
+               AND status = 'active'
+            """,
+            (now, list(vehicle_ids)),
+        )
+        affected = cur.rowcount
+    conn.commit()
+    return affected
 
+
+def run_safety_deactivate(conn: PGConnection) -> int:
+    """Bulk-deactivate every active row with `missing_scan_count >= 2`.
+
+    Freezes `days_to_sell = active_days_accumulated + (now - anchor)`, where
+    anchor = last_activated_at OR date_added. Also bumps seller.total_sold
+    for each affected seller.
+
+    Returns number of rows deactivated.
+    """
     now = datetime.now(timezone.utc)
 
-    # ── Step 1: increment miss counter for active rows absent from live_ids ─
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE vehicles
+               SET status = 'inactive',
+                   date_deactivated = %s,
+                   date_updated = %s,
+                   days_to_sell = COALESCE(active_days_accumulated, 0) + GREATEST(
+                       0,
+                       EXTRACT(DAY FROM %s - COALESCE(last_activated_at, date_added))::INTEGER
+                   )
+             WHERE status = 'active'
+               AND missing_scan_count >= 2
+            RETURNING id, seller_id
+            """,
+            (now, now, now),
+        )
+        deactivated = cur.fetchall()
+
+    if deactivated:
+        seller_ids = [row[1] for row in deactivated if row[1]]
+        if seller_ids:
+            with conn.cursor() as cur:
+                for sid, sold_count in Counter(seller_ids).items():
+                    cur.execute(
+                        "UPDATE sellers SET total_sold = total_sold + %s WHERE id = %s",
+                        (sold_count, sid),
+                    )
+
+    conn.commit()
+    return len(deactivated)
+
+
+def increment_misses_absent_from_live(
+    conn: PGConnection, live_ids: set[int]
+) -> None:
+    """Classic flow: bump missing_scan_count for every active row whose
+    turbo_id is NOT in `live_ids`.
+
+    Used by the Celery path (it collects live_ids from a chord of per-make
+    tasks and doesn't carry a session_start / last_seen_at stamp).
+    """
+    if not live_ids:
+        return
+    now = datetime.now(timezone.utc)
     with conn.cursor() as cur:
         cur.execute(
             "CREATE TEMP TABLE _live_ids (turbo_id INTEGER PRIMARY KEY) ON COMMIT DROP"
         )
-
         ids_list = list(live_ids)
         for i in range(0, len(ids_list), 10_000):
             chunk = ids_list[i : i + 10_000]
             values = ", ".join(f"({tid})" for tid in chunk)
             cur.execute(
-                f"INSERT INTO _live_ids (turbo_id) VALUES {values} ON CONFLICT DO NOTHING"
+                f"INSERT INTO _live_ids (turbo_id) VALUES {values} "
+                f"ON CONFLICT DO NOTHING"
             )
-
         cur.execute(
             """
             UPDATE vehicles
@@ -84,10 +144,37 @@ def run_lifecycle_check_sync(
         )
     conn.commit()
 
-    # ── Step 2: final VC snapshot for rows at the two-miss threshold ────────
-    # On delisted pages turbo.az still surfaces the view count, so we get a
-    # genuine "last count of this active window" even after the seller closed
-    # the listing. Skipped if no browser was passed.
+
+# ── Celery-path wrapper (legacy 3-step flow) ──────────────────────────────────
+
+def run_lifecycle_check_sync(
+    conn: PGConnection,
+    live_ids: set[int],
+    detail_page=None,
+) -> int:
+    """Legacy 3-step lifecycle for the Celery (tasks.py) path:
+
+      1. Increment missing_scan_count for active rows absent from live_ids.
+      2. If `detail_page` is provided, fetch detail once for every row at
+         >= 2 misses to capture a final view-count snapshot + confirm delist.
+      3. Bulk deactivate all remaining active rows at >= 2 misses.
+
+    run_local.py no longer uses this — it composes the staged flow out of
+    `increment_misses_for_ids` + `run_safety_deactivate` directly. Kept here
+    so the Celery chord callback can continue to work unmodified.
+
+    Returns the total number of newly-deactivated vehicles.
+    """
+    if not live_ids:
+        log.warning(
+            "lifecycle_check: live_ids is empty — skipping to avoid mass deactivation"
+        )
+        return 0
+
+    # Step 1 — increment miss counter for active rows absent from live_ids.
+    increment_misses_absent_from_live(conn, live_ids)
+
+    # Step 2 — optional final-VC snapshot for rows at the two-miss threshold.
     delisted_ids: set[int] = set()
     if detail_page is not None:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -137,47 +224,13 @@ def run_lifecycle_check_sync(
                         f"  mark_delisted failed for vehicle {vehicle_id}: {e}"
                     )
             else:
-                # Absent from index for 2 scans but reachable without a
-                # delisted marker — likely a turbo.az search-index hiccup.
-                # Proceed to step 3 anyway; the two-miss rule has fired.
                 log.warning(
                     f"  Vehicle {vehicle_id} absent from index 2x but detail "
                     f"page has no delisted marker — deactivating via two-miss rule"
                 )
 
-    # ── Step 3: bulk-deactivate any remaining active rows at the threshold ─
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE vehicles
-               SET status = 'inactive',
-                   date_deactivated = %s,
-                   date_updated = %s,
-                   days_to_sell = COALESCE(active_days_accumulated, 0) + GREATEST(
-                       0,
-                       EXTRACT(DAY FROM %s - COALESCE(last_activated_at, date_added))::INTEGER
-                   )
-             WHERE status = 'active'
-               AND missing_scan_count >= 2
-            RETURNING id, seller_id
-            """,
-            (now, now, now),
-        )
-        bulk_deactivated = cur.fetchall()
-
-    bulk_count = len(bulk_deactivated)
-
-    if bulk_count > 0:
-        seller_ids = [row[1] for row in bulk_deactivated if row[1]]
-        if seller_ids:
-            with conn.cursor() as cur:
-                for sid, sold_count in Counter(seller_ids).items():
-                    cur.execute(
-                        "UPDATE sellers SET total_sold = total_sold + %s WHERE id = %s",
-                        (sold_count, sid),
-                    )
-
-    conn.commit()
+    # Step 3 — bulk deactivate remaining active rows at >= 2 misses.
+    bulk_count = run_safety_deactivate(conn)
 
     total = bulk_count + len(delisted_ids)
     log.info(
