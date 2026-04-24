@@ -1,1 +1,2 @@
 LADA (VAZ):52
+detail:8285
