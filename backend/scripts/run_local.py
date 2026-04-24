@@ -88,8 +88,9 @@ CHECKPOINT_FILE = Path(__file__).parent.parent / "scraper_checkpoint.txt"
 def _read_checkpoint_lines() -> dict[str, str]:
     """Parse checkpoint file into a key→value dict.
 
-    Phase-1 line format:  ``make_name`` or ``make_name:page``  (key = "phase1")
-    Detail line format:   ``detail:vehicle_id``               (key = "detail")
+    Phase-1 line format:       ``make_name`` or ``make_name:page``  (key = "phase1")
+    Detail line format:        ``detail:vehicle_id``                (key = "detail")
+    Full-details line format:  ``full_detail:turbo_id``             (key = "full_detail")
     """
     result: dict[str, str] = {}
     if not CHECKPOINT_FILE.exists():
@@ -98,7 +99,10 @@ def _read_checkpoint_lines() -> dict[str, str]:
         line = raw.strip()
         if not line:
             continue
-        if line.startswith("detail:"):
+        # Longest prefix first so full_detail: isn't eaten by detail:.
+        if line.startswith("full_detail:"):
+            result["full_detail"] = line[len("full_detail:"):]
+        elif line.startswith("detail:"):
             result["detail"] = line[7:]
         else:
             result["phase1"] = line
@@ -111,6 +115,8 @@ def _write_checkpoint_lines(lines: dict[str, str]) -> None:
         parts.append(lines["phase1"])
     if "detail" in lines:
         parts.append(f"detail:{lines['detail']}")
+    if "full_detail" in lines:
+        parts.append(f"full_detail:{lines['full_detail']}")
     if parts:
         CHECKPOINT_FILE.write_text("\n".join(parts), encoding="utf-8")
     elif CHECKPOINT_FILE.exists():
@@ -158,6 +164,25 @@ def clear_detail_checkpoint() -> None:
     """Clear detail checkpoint (preserves Phase-1 checkpoint if present)."""
     data = _read_checkpoint_lines()
     data.pop("detail", None)
+    _write_checkpoint_lines(data)
+
+
+def load_full_detail_checkpoint() -> int | None:
+    """Return last successfully processed turbo_id from a --full-details run."""
+    val = _read_checkpoint_lines().get("full_detail", "")
+    return int(val) if val.isdigit() else None
+
+
+def save_full_detail_checkpoint(turbo_id: int) -> None:
+    data = _read_checkpoint_lines()
+    data["full_detail"] = str(turbo_id)
+    _write_checkpoint_lines(data)
+
+
+def clear_full_detail_checkpoint() -> None:
+    """Clear --full-details checkpoint (preserves other checkpoints if present)."""
+    data = _read_checkpoint_lines()
+    data.pop("full_detail", None)
     _write_checkpoint_lines(data)
 
 
@@ -300,6 +325,118 @@ def _run_inactive_details(
         )
 
 
+def _run_full_details(
+    browser: "BrowserManager",
+    conn,
+    target_make: str = None,
+) -> None:
+    """Re-scrape EVERY vehicle detail page in DB, FIFO by vehicle.id.
+
+    Rules (see plan at C:/Users/info/.claude/plans/i-need-button-in-shiny-eagle.md):
+      - 404 / delisted page → skip the row untouched (no status change, no writes).
+        Still advance the checkpoint so the next iteration moves on.
+      - Live page → update_vehicle_detail(..., preserve_collections_if_shorter=True).
+        Scalar null-preservation already exists inside update_vehicle_detail;
+        the flag adds the same rule for images/features/labels.
+      - Load failure ({} result) → DO NOT advance checkpoint; next run retries.
+
+    Progress file: ``full_detail:<turbo_id>`` line in scraper_checkpoint.txt.
+    Resume: look up the internal id for that turbo_id and slice by id > that id.
+    """
+    sql = "SELECT id, turbo_id, url FROM vehicles"
+    params: tuple = ()
+    if target_make:
+        sql += " WHERE LOWER(make) = LOWER(%s)"
+        params = (target_make,)
+    sql += " ORDER BY id ASC"
+
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        rows: list[tuple[int, int, str]] = [
+            (row[0], row[1], row[2]) for row in cur.fetchall()
+        ]
+
+    if not rows:
+        log.info("--full-details: no vehicles in DB. Nothing to do.")
+        return
+
+    last_turbo_id = load_full_detail_checkpoint()
+    if last_turbo_id is not None:
+        resume_id = next(
+            (vid for vid, tid, _ in rows if tid == last_turbo_id),
+            None,
+        )
+        if resume_id is not None:
+            before = len(rows)
+            rows = [r for r in rows if r[0] > resume_id]
+            skipped = before - len(rows)
+            if skipped:
+                log.info(
+                    f"--full-details: resuming past turbo_id={last_turbo_id} "
+                    f"(skipped {skipped} already-done)"
+                )
+        else:
+            log.warning(
+                f"--full-details: checkpoint turbo_id={last_turbo_id} not in "
+                f"current set — ignoring and starting from the beginning"
+            )
+
+    log.info(f"--full-details: {len(rows)} vehicle(s) to process")
+    detail_page = browser.new_page()
+
+    processed = 0
+    skipped_delisted = 0
+    load_failed = 0
+
+    try:
+        total = len(rows)
+        for i, (vehicle_id, turbo_id, url) in enumerate(rows, 1):
+            if i % 50 == 0 or i == total:
+                log.info(f"  Full details: {i}/{total}")
+
+            try:
+                detail = scrape_detail(detail_page, url)
+            except Exception as e:
+                log.warning(f"  Detail fetch failed for {url}: {e}")
+                load_failed += 1
+                continue
+
+            if not detail:
+                # page didn't load — leave checkpoint so we retry this row next run
+                load_failed += 1
+                continue
+
+            if detail.get("delisted"):
+                # 404 / delisted marker → skip row untouched but advance checkpoint
+                skipped_delisted += 1
+                save_full_detail_checkpoint(turbo_id)
+                continue
+
+            try:
+                update_vehicle_detail(
+                    conn,
+                    vehicle_id,
+                    detail,
+                    preserve_collections_if_shorter=True,
+                )
+                processed += 1
+            except Exception as e:
+                log.warning(
+                    f"  update_vehicle_detail failed for vehicle {vehicle_id}: {e}"
+                )
+                continue
+
+            save_full_detail_checkpoint(turbo_id)
+    finally:
+        browser.close_page(detail_page)
+
+    clear_full_detail_checkpoint()
+    log.info(
+        f"--full-details: done — processed={processed}, "
+        f"skipped_delisted={skipped_delisted}, load_failed={load_failed}"
+    )
+
+
 def run(
     target_make: str = None,
     fresh: bool = False,
@@ -308,6 +445,7 @@ def run(
     skip_lifecycle: bool = False,
     inactive_details: bool = False,
     delete_unscrapable: bool = False,
+    full_details: bool = False,
 ):
     log.info("=== turbo_market local scraper starting ===")
     browser = BrowserManager()
@@ -320,6 +458,14 @@ def run(
         _run_inactive_details(
             browser, conn, target_make=target_make, delete_unscrapable=delete_unscrapable
         )
+        conn.close()
+        browser.stop()
+        return
+
+    # ── --full-details: FIFO re-scrape of every vehicle in DB ──────────────────
+    # Standalone mode, same shape as --inactive-details.
+    if full_details:
+        _run_full_details(browser, conn, target_make=target_make)
         conn.close()
         browser.stop()
         return
@@ -671,6 +817,16 @@ if __name__ == "__main__":
             "page is already gone (delisted). Cleans up unrecoverable rows."
         ),
     )
+    parser.add_argument(
+        "--full-details",
+        action="store_true",
+        help=(
+            "Re-scrape EVERY vehicle detail page (FIFO by id). "
+            "Skips 404/delisted rows untouched; preserves images/features/"
+            "labels on thin re-scrapes. Resumes via full_detail:<turbo_id> "
+            "line in scraper_checkpoint.txt."
+        ),
+    )
     args = parser.parse_args()
 
     if args.headless:
@@ -684,4 +840,5 @@ if __name__ == "__main__":
         skip_lifecycle=args.skip_lifecycle,
         inactive_details=args.inactive_details,
         delete_unscrapable=args.delete_unscrapable,
+        full_details=args.full_details,
     )

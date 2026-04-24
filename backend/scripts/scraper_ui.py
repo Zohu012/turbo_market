@@ -118,6 +118,7 @@ HTML = """<!DOCTYPE html>
         <label style="color:#8b94a3;">All makes:</label>
         <button id="btn-details" class="secondary">Details only</button>
         <button id="btn-listings" class="secondary">Listings only</button>
+        <button id="btn-full-details" class="secondary" title="Re-scrape every vehicle URL in FIFO order (oldest id first). 404/delisted rows are skipped untouched; images/features/labels are preserved on thin re-scrapes. Safe to resume via full_detail:<turbo_id> in scraper_checkpoint.txt.">Details run (full)</button>
       </div>
       <div class="row" style="margin-top: 14px;">
         <button id="btn-reset-details" class="secondary" title="Clears raw_detail_json for selected make (or all if none selected) so Phase 2 will re-fetch them">Reset details (force re-scrape)</button>
@@ -195,7 +196,7 @@ async function refreshStatus() {
     $('stat-last').textContent = s.last_update ? new Date(s.last_update).toLocaleString() : '—';
     $('stat-pid').textContent = s.pid || '—';
 
-    ['btn-full','btn-fresh','btn-make','btn-details','btn-listings'].forEach(id => $(id).disabled = s.running);
+    ['btn-full','btn-fresh','btn-make','btn-details','btn-listings','btn-full-details'].forEach(id => $(id).disabled = s.running);
     $('btn-stop').disabled = !s.running;
 
     // Log
@@ -268,6 +269,12 @@ $('btn-make-listings').onclick = () => {
 };
 $('btn-details').onclick = () => start({ mode: 'details' });
 $('btn-listings').onclick = () => start({ mode: 'listings' });
+$('btn-full-details').onclick = () => {
+  const m = $('make-select').value;
+  const scope = m ? `make "${m}"` : 'ALL makes';
+  if (!confirm(`Full re-scrape of every vehicle in ${scope}. This can take a long time. Tracks progress by turbo_id in scraper_checkpoint.txt — safe to stop and resume. Continue?`)) return;
+  start(m ? { mode: 'full-details', make: m } : { mode: 'full-details' });
+};
 $('btn-stop').onclick = async () => {
   if (!confirm('Stop scraper?')) return;
   await api('/api/stop', 'POST');
@@ -394,7 +401,7 @@ def api_start(
     mode: str = Query("full"),
     make: str | None = Query(None),
 ):
-    """mode: full | fresh | single | details | listings"""
+    """mode: full | fresh | single | details | listings | full-details"""
     global _proc
     if _proc is not None and _proc.poll() is None:
         return JSONResponse({"error": "scraper is already running"}, status_code=400)
@@ -410,6 +417,10 @@ def api_start(
             args += ["--make", make]
     elif mode == "listings":
         args += ["--skip-details"]
+        if make:
+            args += ["--make", make]
+    elif mode == "full-details":
+        args += ["--full-details"]
         if make:
             args += ["--make", make]
     elif mode == "fresh":
