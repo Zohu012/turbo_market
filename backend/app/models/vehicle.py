@@ -77,6 +77,13 @@ class Vehicle(Base):
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )
 
+    # Queue flag for the decoupled Listing → Details Update split. Set TRUE
+    # by Listing runs on new / reactivated / bumped / delist-suspect rows;
+    # cleared by Details Update after the row processes.
+    needs_detail_refresh: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+
     seller_id: Mapped[Optional[int]] = mapped_column(
         BigInteger, ForeignKey("sellers.id", ondelete="SET NULL")
     )
@@ -122,6 +129,11 @@ class Vehicle(Base):
         Index("idx_vehicles_date_updated_turbo", "date_updated_turbo"),
         Index("idx_vehicles_last_seen_at", "last_seen_at"),
         Index("idx_vehicles_make_model_year_status", "make", "model", "year", "status"),
+        Index(
+            "idx_vehicles_needs_detail_refresh",
+            "needs_detail_refresh",
+            postgresql_where="needs_detail_refresh = TRUE",
+        ),
     )
 
 

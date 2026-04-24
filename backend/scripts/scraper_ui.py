@@ -5,11 +5,17 @@ Run from backend/:
     py -3.12 scripts/scraper_ui.py
 Then open: http://localhost:8001
 
+Five-mode listing/details split:
+    1. Listing Full        — all makes, listing pages only
+    2. Listing by make     — one make, listing pages only
+    3. Details Full        — FIFO every row in DB
+    4. Details Update      — only rows flagged needs_detail_refresh=TRUE
+    5. Details by make     — FIFO every row of one make
+
 Features:
-    - Start full / fresh / single-make / details-only / listings-only scans
     - Live stop button (SIGTERM, falls back to kill after 10s)
     - Tails scraper_local.log in real time
-    - Shows checkpoint, DB stats, pending details count
+    - Shows checkpoint, DB stats, queued details count
 """
 import json
 import os
@@ -104,25 +110,16 @@ HTML = """<!DOCTYPE html>
     <div class="card">
       <h2>Controls</h2>
       <div class="row">
-        <button id="btn-full">Full scan (resume)</button>
-        <button id="btn-fresh" class="secondary">Fresh scan</button>
+        <label style="color:#8b94a3;">All makes:</label>
+        <button id="btn-listing-full" title="Listing pages only — scrape every make. Flags new/updated/delist-suspect rows for Details Update. Two-miss safety deactivates rows absent twice in a row.">Listing Full</button>
+        <button id="btn-details-full" class="secondary" title="FIFO over every vehicle in DB (by vehicle.id). Live page → update detail; delisted page → mark_delisted; load failure → retry next run.">Details Full</button>
+        <button id="btn-details-update" class="secondary" title="FIFO over rows flagged needs_detail_refresh=TRUE. Clears the flag after each row. Run after Listing Full to drain the queue.">Details Update</button>
       </div>
       <div class="row">
         <label>Make:</label>
         <select id="make-select" style="min-width: 160px;"><option value="">(load…)</option></select>
-        <button id="btn-make">Full scan make</button>
-        <button id="btn-make-details" class="secondary">Details only (make)</button>
-        <button id="btn-make-listings" class="secondary">Listings only (make)</button>
-      </div>
-      <div class="row">
-        <label style="color:#8b94a3;">All makes:</label>
-        <button id="btn-details" class="secondary">Details only</button>
-        <button id="btn-listings" class="secondary">Listings only</button>
-        <button id="btn-full-details" class="secondary" title="Re-scrape every vehicle URL in FIFO order (oldest id first). 404/delisted rows are skipped untouched; images/features/labels are preserved on thin re-scrapes. Safe to resume via full_detail:<turbo_id> in scraper_checkpoint.txt.">Details run (full)</button>
-      </div>
-      <div class="row" style="margin-top: 14px;">
-        <button id="btn-reset-details" class="secondary" title="Clears raw_detail_json for selected make (or all if none selected) so Phase 2 will re-fetch them">Reset details (force re-scrape)</button>
-        <button id="btn-reset-sellerless" class="secondary" title="Only clears vehicles where seller_id IS NULL (minimal re-work)">Reset only sellerless</button>
+        <button id="btn-listing-make">Listing by make</button>
+        <button id="btn-details-make" class="secondary">Details by make</button>
       </div>
       <div class="row" style="margin-top: 14px;">
         <button id="btn-stop" class="danger" disabled>Stop</button>
@@ -134,7 +131,7 @@ HTML = """<!DOCTYPE html>
       <div class="stat"><span class="stat-label">Checkpoint</span><span id="stat-checkpoint" class="stat-value">—</span></div>
       <div class="stat"><span class="stat-label">Active vehicles</span><span id="stat-active" class="stat-value">—</span></div>
       <div class="stat"><span class="stat-label">Inactive</span><span id="stat-inactive" class="stat-value">—</span></div>
-      <div class="stat"><span class="stat-label">Pending detail pages</span><span id="stat-pending" class="stat-value">—</span></div>
+      <div class="stat"><span class="stat-label">Queued for Details Update</span><span id="stat-pending" class="stat-value">—</span></div>
       <div class="stat"><span class="stat-label">Last DB update</span><span id="stat-last" class="stat-value">—</span></div>
       <div class="stat"><span class="stat-label">Process PID</span><span id="stat-pid" class="stat-value">—</span></div>
     </div>
@@ -196,7 +193,7 @@ async function refreshStatus() {
     $('stat-last').textContent = s.last_update ? new Date(s.last_update).toLocaleString() : '—';
     $('stat-pid').textContent = s.pid || '—';
 
-    ['btn-full','btn-fresh','btn-make','btn-details','btn-listings','btn-full-details'].forEach(id => $(id).disabled = s.running);
+    ['btn-listing-full','btn-listing-make','btn-details-full','btn-details-update','btn-details-make'].forEach(id => $(id).disabled = s.running);
     $('btn-stop').disabled = !s.running;
 
     // Log
@@ -246,57 +243,26 @@ async function start(params) {
   refreshStatus();
 }
 
-$('btn-full').onclick = () => start({ mode: 'full' });
-$('btn-fresh').onclick = () => {
-  if (confirm('Fresh scan ignores checkpoint and restarts from first make. Continue?')) {
-    start({ mode: 'fresh' });
-  }
-};
-$('btn-make').onclick = () => {
+$('btn-listing-full').onclick = () => start({ mode: 'listing-full' });
+$('btn-listing-make').onclick = () => {
   const m = $('make-select').value;
   if (!m) { alert('Pick a make first'); return; }
-  start({ mode: 'single', make: m });
+  start({ mode: 'listing-make', make: m });
 };
-$('btn-make-details').onclick = () => {
+$('btn-details-full').onclick = () => {
+  if (!confirm('Details Full re-scrapes every vehicle in DB (FIFO by id). This can take a long time. Safe to stop and resume via the details_full checkpoint. Continue?')) return;
+  start({ mode: 'details-full' });
+};
+$('btn-details-update').onclick = () => start({ mode: 'details-update' });
+$('btn-details-make').onclick = () => {
   const m = $('make-select').value;
   if (!m) { alert('Pick a make first'); return; }
-  start({ mode: 'details', make: m });
-};
-$('btn-make-listings').onclick = () => {
-  const m = $('make-select').value;
-  if (!m) { alert('Pick a make first'); return; }
-  start({ mode: 'listings', make: m });
-};
-$('btn-details').onclick = () => start({ mode: 'details' });
-$('btn-listings').onclick = () => start({ mode: 'listings' });
-$('btn-full-details').onclick = () => {
-  const m = $('make-select').value;
-  const scope = m ? `make "${m}"` : 'ALL makes';
-  if (!confirm(`Full re-scrape of every vehicle in ${scope}. This can take a long time. Tracks progress by turbo_id in scraper_checkpoint.txt — safe to stop and resume. Continue?`)) return;
-  start(m ? { mode: 'full-details', make: m } : { mode: 'full-details' });
+  if (!confirm(`Details by make re-scrapes every "${m}" vehicle (FIFO by id). Safe to stop and resume. Continue?`)) return;
+  start({ mode: 'details-make', make: m });
 };
 $('btn-stop').onclick = async () => {
   if (!confirm('Stop scraper?')) return;
   await api('/api/stop', 'POST');
-  refreshStatus();
-};
-
-$('btn-reset-details').onclick = async () => {
-  const m = $('make-select').value;
-  const label = m ? `make "${m}"` : 'ALL makes';
-  if (!confirm(`Clear raw_detail_json for ${label}? Next "Details only" run will re-fetch every active vehicle.`)) return;
-  const r = await api('/api/reset-details?' + new URLSearchParams(m ? { make: m } : {}), 'POST');
-  alert(r.error ? 'Error: ' + r.error : `Reset ${r.updated} rows — now click "Details only"`);
-  refreshStatus();
-};
-$('btn-reset-sellerless').onclick = async () => {
-  const m = $('make-select').value;
-  const label = m ? `make "${m}"` : 'ALL makes';
-  if (!confirm(`Clear raw_detail_json for vehicles in ${label} where seller_id IS NULL?`)) return;
-  const params = { sellerless: '1' };
-  if (m) params.make = m;
-  const r = await api('/api/reset-details?' + new URLSearchParams(params), 'POST');
-  alert(r.error ? 'Error: ' + r.error : `Reset ${r.updated} sellerless rows — now click "Details only"`);
   refreshStatus();
 };
 
@@ -357,7 +323,7 @@ def api_status():
                 SELECT
                   COUNT(*) FILTER (WHERE status = 'active'),
                   COUNT(*) FILTER (WHERE status = 'inactive'),
-                  COUNT(*) FILTER (WHERE status = 'active' AND raw_detail_json IS NULL),
+                  COUNT(*) FILTER (WHERE needs_detail_refresh = TRUE),
                   MAX(date_updated)
                 FROM vehicles
                 """
@@ -398,34 +364,30 @@ def api_status():
 
 @app.post("/api/start")
 def api_start(
-    mode: str = Query("full"),
+    mode: str = Query(...),
     make: str | None = Query(None),
 ):
-    """mode: full | fresh | single | details | listings | full-details"""
+    """mode: listing-full | listing-make | details-full | details-update | details-make"""
     global _proc
     if _proc is not None and _proc.poll() is None:
         return JSONResponse({"error": "scraper is already running"}, status_code=400)
 
     args = [sys.executable, "scripts/run_local.py"]
-    if mode == "single":
+    if mode == "listing-full":
+        args += ["--listing-full"]
+    elif mode == "listing-make":
         if not make:
             return JSONResponse({"error": "make is required"}, status_code=400)
-        args += ["--make", make]
-    elif mode == "details":
-        args += ["--details-only", "--skip-lifecycle"]
-        if make:
-            args += ["--make", make]
-    elif mode == "listings":
-        args += ["--skip-details"]
-        if make:
-            args += ["--make", make]
-    elif mode == "full-details":
-        args += ["--full-details"]
-        if make:
-            args += ["--make", make]
-    elif mode == "fresh":
-        args += ["--fresh"]
-    elif mode != "full":
+        args += ["--listing-make", make]
+    elif mode == "details-full":
+        args += ["--details-full"]
+    elif mode == "details-make":
+        if not make:
+            return JSONResponse({"error": "make is required"}, status_code=400)
+        args += ["--details-full", "--make", make]
+    elif mode == "details-update":
+        args += ["--details-update"]
+    else:
         return JSONResponse({"error": f"unknown mode: {mode}"}, status_code=400)
 
     # Fresh start wipes the log so the UI shows only this run
@@ -441,37 +403,6 @@ def api_start(
         stderr=subprocess.DEVNULL,
     )
     return {"started": True, "pid": _proc.pid, "args": args[1:]}
-
-
-@app.post("/api/reset-details")
-def api_reset_details(
-    make: str | None = Query(None),
-    sellerless: bool = Query(False),
-):
-    """
-    Clear raw_detail_json on active vehicles so Phase 2 will re-fetch them.
-    Optional filters: make (case-insensitive), sellerless (seller_id IS NULL).
-    """
-    global _proc
-    if _proc is not None and _proc.poll() is None:
-        return JSONResponse(
-            {"error": "stop the scraper first"}, status_code=400
-        )
-
-    sql = "UPDATE vehicles SET raw_detail_json = NULL WHERE status = 'active'"
-    params: list = []
-    if make:
-        sql += " AND LOWER(make) = LOWER(%s)"
-        params.append(make)
-    if sellerless:
-        sql += " AND seller_id IS NULL"
-    try:
-        with get_sync_conn() as conn, conn.cursor() as cur:
-            cur.execute(sql, tuple(params))
-            conn.commit()
-            return {"updated": cur.rowcount}
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 def _extract_listing_fields_from_detail(page, url: str) -> dict | None:

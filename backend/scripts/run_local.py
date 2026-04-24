@@ -1,42 +1,41 @@
 #!/usr/bin/env python3
 """
-Standalone local scraper — staged daily-refresh flow for turbo.az → managed Postgres.
+Standalone local scraper — listing-pass / details-pass split (5 modes).
 
-Run from the backend/ directory:
-    python scripts/run_local.py                  # full scan
-    python scripts/run_local.py --make Toyota    # single-make partial scan
-    python scripts/run_local.py --headless       # headless mode (for cron)
-    python scripts/run_local.py --fresh          # ignore checkpoint, start from first make
-    python scripts/run_local.py --details-only   # skip Phase 1, only fetch missing details
-    python scripts/run_local.py --skip-details   # only Phase 1 (listings), no detail pages
-    python scripts/run_local.py --skip-lifecycle # no sold/removed deactivation
-    python scripts/run_local.py --inactive-details              # backfill specs for inactive rows with null details
-    python scripts/run_local.py --inactive-details --delete-unscrapable  # also delete rows whose pages are gone
+Run from the backend/ directory. Exactly one mode flag must be passed:
 
-Staged flow (full scan):
-  Phase 1  Listing scan. upsert_listing stamps every sighted card with
-           last_seen_at = session_start; returns needs_detail=True for new +
-           bumped rows (new + reactivated + date_updated_turbo drift). Those
-           IDs are collected inline for Phase 3.
+    python scripts/run_local.py --listing-full        # all makes, listing pages only
+    python scripts/run_local.py --listing-make BMW    # one make, listing pages only
+    python scripts/run_local.py --details-full        # FIFO every row in DB
+    python scripts/run_local.py --details-full --make BMW   # FIFO scoped to one make
+    python scripts/run_local.py --details-update      # only rows flagged needs_detail_refresh
 
-  Phase 2  Classification (SQL-only). select_delist_suspects finds active
-           vehicles whose last_seen_at < session_start — i.e. cards that did
-           NOT appear in this session's scan. Zero detail hits.
+Common flags:
+    --headless        force headless mode (overrides SCRAPER_MODE in .env)
 
-  Phase 3  Unified detail fetch. Single loop over new ∪ bumped ∪ suspects.
-           For each: scrape_detail → dispatch on detail["delisted"]:
-             delisted     → mark_delisted + persist_view_count (day-1 deactivation)
-             not delisted → update_vehicle_detail
-                            (if it was a suspect, remember for Phase 4)
+Listing pass (`--listing-full` / `--listing-make`):
+    1. Scrape listing pages → upsert_listing flags new / reactivated /
+       date_updated_turbo-bumped rows with needs_detail_refresh=TRUE.
+    2. select_delist_suspects flags every active row that was absent from
+       this session's scan with needs_detail_refresh=TRUE.
+    3. Two-miss safety: bump missing_scan_count for those suspects, bulk
+       deactivate at >= 2.
 
-  Phase 4  Safety sweep. Any suspect that came back not-delisted-but-absent
-           gets missing_scan_count bumped. Bulk deactivate rows at >= 2 misses
-           (two-miss guard against transient paginator hiccups).
+Details pass (`--details-full` / `--details-update`):
+    Iterates rows by `vehicle.id` ASC. Per row:
+      - delisted page → mark_delisted (status='inactive', date_deactivated,
+        days_to_sell, persist final view_count).
+      - live page → update_vehicle_detail (preserve_collections_if_shorter
+        on --details-full to keep historical images/features/labels).
+      - load failure → don't advance checkpoint; retry next run.
+    --details-update additionally clears needs_detail_refresh after each row.
 
-Checkpoint/resume:
-    Phase 1 saves last completed make to scraper_checkpoint.txt; next run skips
-    done makes. Cleared when Phase 1 finishes cleanly. --fresh ignores it.
-    Phase 2-4 are pure DB state — no file-based checkpoint needed.
+Checkpoint file: backend/scraper_checkpoint.txt — multiline, one key per line:
+    listing_full:Chevrolet:75
+    listing_make:BMW:12
+    details_full:11761                  # vehicle.id
+    details_full_make:Chevrolet:11761   # per-make scope is separate
+    details_update:5234
 
 Set environment via backend/.env:
     SYNC_DATABASE_URL=postgresql://turbo:PASS@host.db.ondigitalocean.com:25060/turbo_market?sslmode=require
@@ -50,6 +49,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 # Allow running from backend/ directory
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -73,6 +73,7 @@ from app.scraper.pipeline import (
     update_vehicle_detail,
     mark_delisted,
     persist_view_count,
+    clear_needs_detail_refresh,
 )
 from app.scraper.session import create_session, finish_session, update_session
 from app.scraper.classifier import select_delist_suspects
@@ -84,397 +85,98 @@ from app.scraper.lifecycle import (
 
 CHECKPOINT_FILE = Path(__file__).parent.parent / "scraper_checkpoint.txt"
 
+# Order keys are written back to disk in. Stable order keeps diffs readable.
+_CHECKPOINT_KEYS = (
+    "listing_full",
+    "listing_make",
+    "details_full",
+    "details_full_make",
+    "details_update",
+)
 
-def _read_checkpoint_lines() -> dict[str, str]:
-    """Parse checkpoint file into a key→value dict.
 
-    Phase-1 line format:       ``make_name`` or ``make_name:page``  (key = "phase1")
-    Detail line format:        ``detail:vehicle_id``                (key = "detail")
-    Full-details line format:  ``full_detail:turbo_id``             (key = "full_detail")
-    """
+# ── Checkpoint I/O ──────────────────────────────────────────────────────────
+
+
+def _read_checkpoint() -> dict[str, str]:
+    """Parse checkpoint file into a key→value dict. Each line is `key:value`."""
     result: dict[str, str] = {}
     if not CHECKPOINT_FILE.exists():
         return result
     for raw in CHECKPOINT_FILE.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
-        if not line:
+        if not line or ":" not in line:
             continue
-        # Longest prefix first so full_detail: isn't eaten by detail:.
-        if line.startswith("full_detail:"):
-            result["full_detail"] = line[len("full_detail:"):]
-        elif line.startswith("detail:"):
-            result["detail"] = line[7:]
-        else:
-            result["phase1"] = line
+        key, _, value = line.partition(":")
+        if key in _CHECKPOINT_KEYS:
+            result[key] = value
     return result
 
 
-def _write_checkpoint_lines(lines: dict[str, str]) -> None:
-    parts = []
-    if "phase1" in lines:
-        parts.append(lines["phase1"])
-    if "detail" in lines:
-        parts.append(f"detail:{lines['detail']}")
-    if "full_detail" in lines:
-        parts.append(f"full_detail:{lines['full_detail']}")
+def _write_checkpoint(data: dict[str, str]) -> None:
+    parts = [f"{k}:{data[k]}" for k in _CHECKPOINT_KEYS if k in data and data[k]]
     if parts:
         CHECKPOINT_FILE.write_text("\n".join(parts), encoding="utf-8")
     elif CHECKPOINT_FILE.exists():
         CHECKPOINT_FILE.unlink()
 
 
-def load_checkpoint() -> tuple[str | None, int]:
-    """Load Phase-1 checkpoint. Returns (make_name, start_page) or (None, 1)."""
-    data = _read_checkpoint_lines()
-    val = data.get("phase1", "")
-    if val:
-        idx = val.rfind(":")
-        if idx > 0 and val[idx + 1:].isdigit():
-            return val[:idx], int(val[idx + 1:])
-        return val, 1
-    return None, 1
+def _set_checkpoint(key: str, value: str) -> None:
+    data = _read_checkpoint()
+    data[key] = value
+    _write_checkpoint(data)
 
 
-def save_checkpoint(make_name: str, page_num: int = None) -> None:
-    data = _read_checkpoint_lines()
-    data["phase1"] = f"{make_name}:{page_num}" if page_num else make_name
-    _write_checkpoint_lines(data)
+def _clear_checkpoint(key: str) -> None:
+    data = _read_checkpoint()
+    data.pop(key, None)
+    _write_checkpoint(data)
 
 
-def clear_checkpoint() -> None:
-    """Clear Phase-1 checkpoint (preserves detail checkpoint if present)."""
-    data = _read_checkpoint_lines()
-    data.pop("phase1", None)
-    _write_checkpoint_lines(data)
+def _load_listing_progress(key: str) -> tuple[Optional[str], int]:
+    """Decode `make_name:page_num` (or just `make_name`) → (make, page)."""
+    val = _read_checkpoint().get(key, "")
+    if not val:
+        return None, 1
+    idx = val.rfind(":")
+    if idx > 0 and val[idx + 1:].isdigit():
+        return val[:idx], int(val[idx + 1:])
+    return val, 1
 
 
-def load_detail_checkpoint() -> int | None:
-    """Return last successfully processed vehicle_id from a previous details run."""
-    val = _read_checkpoint_lines().get("detail", "")
+def _save_listing_progress(key: str, make_name: str, page_num: Optional[int] = None) -> None:
+    val = f"{make_name}:{page_num}" if page_num else make_name
+    _set_checkpoint(key, val)
+
+
+def _load_details_progress(key: str) -> Optional[int]:
+    val = _read_checkpoint().get(key, "")
     return int(val) if val.isdigit() else None
 
 
-def save_detail_checkpoint(vehicle_id: int) -> None:
-    data = _read_checkpoint_lines()
-    data["detail"] = str(vehicle_id)
-    _write_checkpoint_lines(data)
+def _save_details_progress(key: str, vehicle_id: int) -> None:
+    _set_checkpoint(key, str(vehicle_id))
 
 
-def clear_detail_checkpoint() -> None:
-    """Clear detail checkpoint (preserves Phase-1 checkpoint if present)."""
-    data = _read_checkpoint_lines()
-    data.pop("detail", None)
-    _write_checkpoint_lines(data)
+# ── Listing pass ────────────────────────────────────────────────────────────
 
 
-def load_full_detail_checkpoint() -> int | None:
-    """Return last successfully processed turbo_id from a --full-details run."""
-    val = _read_checkpoint_lines().get("full_detail", "")
-    return int(val) if val.isdigit() else None
-
-
-def save_full_detail_checkpoint(turbo_id: int) -> None:
-    data = _read_checkpoint_lines()
-    data["full_detail"] = str(turbo_id)
-    _write_checkpoint_lines(data)
-
-
-def clear_full_detail_checkpoint() -> None:
-    """Clear --full-details checkpoint (preserves other checkpoints if present)."""
-    data = _read_checkpoint_lines()
-    data.pop("full_detail", None)
-    _write_checkpoint_lines(data)
-
-
-def fetch_inactive_pending_details(conn, target_make: str = None) -> list[tuple[int, str]]:
-    """Inactive vehicles that never got a detail-page fetch (raw_detail_json IS NULL).
-    These were typically deactivated via two-miss before their detail tab was visited.
-    """
-    sql = (
-        "SELECT id, url FROM vehicles "
-        "WHERE status = 'inactive' AND raw_detail_json IS NULL"
-    )
-    params: tuple = ()
-    if target_make:
-        sql += " AND LOWER(make) = LOWER(%s)"
-        params = (target_make,)
-    sql += " ORDER BY id"
-    with conn.cursor() as cur:
-        cur.execute(sql, params)
-        return [(row[0], row[1]) for row in cur.fetchall()]
-
-
-def delete_vehicles_by_ids(conn, vehicle_ids: list[int]) -> int:
-    if not vehicle_ids:
-        return 0
-    with conn.cursor() as cur:
-        cur.execute(
-            "DELETE FROM vehicles WHERE id = ANY(%s)",
-            (vehicle_ids,),
-        )
-        deleted = cur.rowcount
-    conn.commit()
-    return deleted
-
-
-def fetch_pending_details(conn, target_make: str = None) -> list[tuple[int, str]]:
-    """Vehicles that still need a detail-page fetch — active rows with no
-    raw_detail_json yet. Used by --details-only and as a safety backstop so
-    a crashed Phase 3 can be resumed on the next run.
-    """
-    sql = (
-        "SELECT id, url FROM vehicles "
-        "WHERE status = 'active' AND raw_detail_json IS NULL"
-    )
-    params: tuple = ()
-    if target_make:
-        sql += " AND LOWER(make) = LOWER(%s)"
-        params = (target_make,)
-    sql += " ORDER BY id"
-    with conn.cursor() as cur:
-        cur.execute(sql, params)
-        return [(row[0], row[1]) for row in cur.fetchall()]
-
-
-def _run_inactive_details(
+def _run_listing(
     browser: "BrowserManager",
-    conn,
-    target_make: str = None,
-    delete_unscrapable: bool = False,
+    target_make: Optional[str] = None,
 ) -> None:
-    """Backfill detail pages for inactive vehicles that have raw_detail_json IS NULL.
+    """All makes (target_make=None) or one make: scrape listing pages, classify
+    delist-suspects, run two-miss safety deactivate.
 
-    These are vehicles deactivated via two-miss before their detail tab was ever
-    visited. Their turbo.az pages may still be accessible briefly after removal.
-
-    - Page still live → update_vehicle_detail fills in specs (status stays inactive).
-    - Page gone (delisted flag) → kept as-is, OR deleted if --delete-unscrapable.
-
-    Uses the same file-based checkpoint as --details-only (detail:vehicle_id line)
-    so a crash can resume from the last processed vehicle.
+    No detail-page hits — anything that needs a detail fetch is queued via
+    needs_detail_refresh=TRUE for the next Details Update run.
     """
-    rows = fetch_inactive_pending_details(conn, target_make)
-    if not rows:
-        log.info("--inactive-details: no inactive vehicles with missing details. Nothing to do.")
-        return
-
-    # Resume from checkpoint
-    last_id = load_detail_checkpoint()
-    if last_id is not None:
-        before = len(rows)
-        rows = [(vid, url) for vid, url in rows if vid > last_id]
-        skipped = before - len(rows)
-        if skipped:
-            log.info(
-                f"--inactive-details: resuming from checkpoint "
-                f"(last id={last_id}, skipping {skipped} already-done)"
-            )
-
-    log.info(f"--inactive-details: {len(rows)} inactive vehicle(s) to process")
-    detail_page = browser.new_page()
-
-    recovered = 0
-    still_gone: list[int] = []
-
-    try:
-        total = len(rows)
-        for i, (vehicle_id, url) in enumerate(rows, 1):
-            if i % 50 == 0 or i == total:
-                log.info(f"  Inactive details: {i}/{total}")
-            try:
-                detail = scrape_detail(detail_page, url)
-            except Exception as e:
-                log.warning(f"  Detail fetch failed for {url}: {e}")
-                continue
-
-            if not detail:
-                continue
-
-            if detail.get("delisted"):
-                still_gone.append(vehicle_id)
-            else:
-                try:
-                    update_vehicle_detail(conn, vehicle_id, detail)
-                    recovered += 1
-                except Exception as e:
-                    log.warning(f"  update_vehicle_detail failed for vehicle {vehicle_id}: {e}")
-                    continue
-
-            save_detail_checkpoint(vehicle_id)
-
-    finally:
-        browser.close_page(detail_page)
-
-    clear_detail_checkpoint()
-
-    log.info(
-        f"--inactive-details: recovered={recovered}, "
-        f"still gone (page delisted)={len(still_gone)}"
-    )
-
-    if delete_unscrapable and still_gone:
-        deleted = delete_vehicles_by_ids(conn, still_gone)
-        log.info(
-            f"--inactive-details --delete-unscrapable: deleted {deleted} "
-            f"vehicle(s) whose pages were already gone"
-        )
-    elif still_gone:
-        log.info(
-            f"  {len(still_gone)} vehicle(s) had no recoverable page. "
-            f"Re-run with --delete-unscrapable to remove them."
-        )
-
-
-def _run_full_details(
-    browser: "BrowserManager",
-    conn,
-    target_make: str = None,
-) -> None:
-    """Re-scrape EVERY vehicle detail page in DB, FIFO by vehicle.id.
-
-    Rules (see plan at C:/Users/info/.claude/plans/i-need-button-in-shiny-eagle.md):
-      - 404 / delisted page → skip the row untouched (no status change, no writes).
-        Still advance the checkpoint so the next iteration moves on.
-      - Live page → update_vehicle_detail(..., preserve_collections_if_shorter=True).
-        Scalar null-preservation already exists inside update_vehicle_detail;
-        the flag adds the same rule for images/features/labels.
-      - Load failure ({} result) → DO NOT advance checkpoint; next run retries.
-
-    Progress file: ``full_detail:<turbo_id>`` line in scraper_checkpoint.txt.
-    Resume: look up the internal id for that turbo_id and slice by id > that id.
-    """
-    sql = "SELECT id, turbo_id, url FROM vehicles"
-    params: tuple = ()
-    if target_make:
-        sql += " WHERE LOWER(make) = LOWER(%s)"
-        params = (target_make,)
-    sql += " ORDER BY id ASC"
-
-    with conn.cursor() as cur:
-        cur.execute(sql, params)
-        rows: list[tuple[int, int, str]] = [
-            (row[0], row[1], row[2]) for row in cur.fetchall()
-        ]
-
-    if not rows:
-        log.info("--full-details: no vehicles in DB. Nothing to do.")
-        return
-
-    last_turbo_id = load_full_detail_checkpoint()
-    if last_turbo_id is not None:
-        resume_id = next(
-            (vid for vid, tid, _ in rows if tid == last_turbo_id),
-            None,
-        )
-        if resume_id is not None:
-            before = len(rows)
-            rows = [r for r in rows if r[0] > resume_id]
-            skipped = before - len(rows)
-            if skipped:
-                log.info(
-                    f"--full-details: resuming past turbo_id={last_turbo_id} "
-                    f"(skipped {skipped} already-done)"
-                )
-        else:
-            log.warning(
-                f"--full-details: checkpoint turbo_id={last_turbo_id} not in "
-                f"current set — ignoring and starting from the beginning"
-            )
-
-    log.info(f"--full-details: {len(rows)} vehicle(s) to process")
-    detail_page = browser.new_page()
-
-    processed = 0
-    skipped_delisted = 0
-    load_failed = 0
-
-    try:
-        total = len(rows)
-        for i, (vehicle_id, turbo_id, url) in enumerate(rows, 1):
-            if i % 50 == 0 or i == total:
-                log.info(f"  Full details: {i}/{total}")
-
-            try:
-                detail = scrape_detail(detail_page, url)
-            except Exception as e:
-                log.warning(f"  Detail fetch failed for {url}: {e}")
-                load_failed += 1
-                continue
-
-            if not detail:
-                # page didn't load — leave checkpoint so we retry this row next run
-                load_failed += 1
-                continue
-
-            if detail.get("delisted"):
-                # 404 / delisted marker → skip row untouched but advance checkpoint
-                skipped_delisted += 1
-                save_full_detail_checkpoint(turbo_id)
-                continue
-
-            try:
-                update_vehicle_detail(
-                    conn,
-                    vehicle_id,
-                    detail,
-                    preserve_collections_if_shorter=True,
-                )
-                processed += 1
-            except Exception as e:
-                log.warning(
-                    f"  update_vehicle_detail failed for vehicle {vehicle_id}: {e}"
-                )
-                continue
-
-            save_full_detail_checkpoint(turbo_id)
-    finally:
-        browser.close_page(detail_page)
-
-    clear_full_detail_checkpoint()
-    log.info(
-        f"--full-details: done — processed={processed}, "
-        f"skipped_delisted={skipped_delisted}, load_failed={load_failed}"
-    )
-
-
-def run(
-    target_make: str = None,
-    fresh: bool = False,
-    details_only: bool = False,
-    skip_details: bool = False,
-    skip_lifecycle: bool = False,
-    inactive_details: bool = False,
-    delete_unscrapable: bool = False,
-    full_details: bool = False,
-):
-    log.info("=== turbo_market local scraper starting ===")
-    browser = BrowserManager()
-    browser.start()
+    ckpt_key = "listing_make" if target_make else "listing_full"
     conn = get_sync_conn()
 
-    # ── --inactive-details: one-time backfill for inactive rows with no detail ─
-    # Runs standalone — skips all normal phases and session bookkeeping.
-    if inactive_details:
-        _run_inactive_details(
-            browser, conn, target_make=target_make, delete_unscrapable=delete_unscrapable
-        )
-        conn.close()
-        browser.stop()
-        return
-
-    # ── --full-details: FIFO re-scrape of every vehicle in DB ──────────────────
-    # Standalone mode, same shape as --inactive-details.
-    if full_details:
-        _run_full_details(browser, conn, target_make=target_make)
-        conn.close()
-        browser.stop()
-        return
-
-    # ── Open session up-front so we have a canonical session_start to stamp
-    # on every sighted card AND use as the Phase 2 classification threshold. ─
     session_id, session_start = create_session(
         conn,
-        job_type="full_scan" if not target_make else "make_scan",
+        job_type="listing_make" if target_make else "listing_full",
         triggered_by="local",
         target_make=target_make,
     )
@@ -482,278 +184,146 @@ def run(
 
     counters = {"found": 0, "new": 0, "updated": 0, "deactivated": 0}
     session_status = "running"
-    session_error: str | None = None
+    session_error: Optional[str] = None
 
     try:
         page = browser.get_page()
-        # (vehicle_id, url) for rows needing detail — new + bumped + reactivated.
-        needs_detail_ids: list[tuple[int, str]] = []
 
         # ── Phase 1: listing scan ────────────────────────────────────────────
-        if not details_only:
-            all_makes = get_all_makes(page)
+        all_makes = get_all_makes(page)
 
-            if target_make:
-                makes = [
-                    m for m in all_makes if m["name"].lower() == target_make.lower()
-                ]
-                if not makes:
-                    log.error(
-                        f"Make '{target_make}' not found. "
-                        f"Available (first 10): {[m['name'] for m in all_makes[:10]]}..."
-                    )
-                    session_status = "failed"
-                    session_error = f"Make '{target_make}' not found"
-                    return
-                resume_from_page = 1
-            else:
-                makes = all_makes
-                resume_from_page = 1
-                if fresh:
-                    clear_checkpoint()
-                else:
-                    last_make, resume_from_page = load_checkpoint()
-                    if last_make:
-                        idx = next(
-                            (i for i, m in enumerate(makes) if m["name"] == last_make),
-                            -1,
-                        )
-                        if idx >= 0:
-                            if resume_from_page > 1:
-                                # Make was interrupted mid-scrape — include it, start from saved page.
-                                makes = makes[idx:]
-                                log.info(
-                                    f"Resuming '{last_make}' from page {resume_from_page} — "
-                                    f"skipping {idx} already-done makes, {len(makes)} remaining"
-                                )
-                            else:
-                                # Make completed cleanly — skip it entirely.
-                                makes = makes[idx + 1:]
-                                log.info(
-                                    f"Resuming after completed make '{last_make}' — "
-                                    f"skipping {idx + 1} already-done, {len(makes)} remaining"
-                                )
-                        else:
-                            log.warning(
-                                f"Checkpoint make '{last_make}' not in current list — ignoring"
-                            )
-                            resume_from_page = 1
-
-            log.info(f"Phase 1: scanning {len(makes)} make(s)")
-
-            for make in makes:
-                log.info(f"[make] {make['name']}")
-                committed = {"n": 0}
-                current_page = {"num": resume_from_page}
-
-                def _commit_page(vehicles_on_page, page_num):
-                    # Per-page commit — preserves earlier pages if a later
-                    # page times out. upsert_listing also records per-row
-                    # needs_detail via its return value.
-                    for v in vehicles_on_page:
-                        vid, action, _, needs_detail = upsert_listing(
-                            conn, v, session_start=session_start
-                        )
-                        counters["found"] += 1
-                        if action == "new":
-                            counters["new"] += 1
-                        elif action == "updated":
-                            counters["updated"] += 1
-                        if needs_detail:
-                            needs_detail_ids.append((vid, v["url"]))
-                    committed["n"] += len(vehicles_on_page)
-                    current_page["num"] = page_num
-                    if not target_make:
-                        save_checkpoint(make["name"], page_num)
-
-                try:
-                    vehicles = scrape_make_pages(
-                        page, make, start_page=resume_from_page, on_page_complete=_commit_page
-                    )
-                    log.info(
-                        f"  {make['name']}: {len(vehicles)} found, "
-                        f"{committed['n']} committed"
-                    )
-                except Exception as e:
-                    log.error(
-                        f"  {make['name']} failed after page {current_page['num']}, "
-                        f"committed {committed['n']} vehicles: {e}"
-                    )
-                    continue
-                finally:
-                    if not target_make:
-                        save_checkpoint(make["name"])
-                    resume_from_page = 1
-
-            if not target_make:
-                clear_checkpoint()
-
-            # Persist counters mid-session so a crash between here and
-            # finish_session() still leaves something in scrape_jobs.
-            update_session(
-                conn,
-                session_id,
-                listings_found=counters["found"],
-                listings_new=counters["new"],
-                listings_updated=counters["updated"],
-            )
+        if target_make:
+            makes = [
+                m for m in all_makes if m["name"].lower() == target_make.lower()
+            ]
+            if not makes:
+                log.error(
+                    f"Make '{target_make}' not found. "
+                    f"Available (first 10): {[m['name'] for m in all_makes[:10]]}..."
+                )
+                session_status = "failed"
+                session_error = f"Make '{target_make}' not found"
+                return
+            resume_from_page = 1
+            last_make, saved_page = _load_listing_progress(ckpt_key)
+            if last_make and last_make.lower() == target_make.lower() and saved_page > 1:
+                resume_from_page = saved_page
+                log.info(f"Resuming '{target_make}' from page {resume_from_page}")
         else:
-            log.info("Phase 1 skipped (--details-only)")
-
-        do_lifecycle = (
-            not target_make and not details_only and not skip_lifecycle
-        )
-
-        # ── Phase 2: classification (SQL-only, zero detail hits) ─────────────
-        # Rows that are still active but were absent from this session's
-        # listing scan. Scope-safe via target_make.
-        if details_only or skip_details:
-            # No Phase 1 in these modes → no meaningful suspects to compute.
-            delist_suspects: list[tuple[int, str]] = []
-        else:
-            delist_suspects = select_delist_suspects(
-                conn, session_start, target_make
-            )
-            log.info(
-                f"Phase 2: {len(delist_suspects)} delist-suspect(s) "
-                f"(active rows absent from this scan)"
-            )
-
-        # ── Detail browser tab — reused across Phase 3 ───────────────────────
-        # One persistent tab preserves the Cloudflare session: one solved
-        # challenge covers every subsequent navigation in this run.
-        need_detail_tab = (not skip_details) or (
-            do_lifecycle and len(delist_suspects) > 0
-        )
-        detail_page = browser.new_page() if need_detail_tab else None
-
-        suspect_ids = {vid for vid, _ in delist_suspects}
-        still_absent_not_delisted: list[int] = []
-
-        try:
-            # ── Phase 3: unified detail fetch ────────────────────────────────
-            # Union new ∪ bumped ∪ delist-suspects (de-duped by vehicle id —
-            # a vehicle could in theory appear in both if it was bumped AND
-            # then went absent, but dedup is harmless).
-            to_fetch: dict[int, str] = {}
-            if not skip_details:
-                for vid, url in needs_detail_ids:
-                    to_fetch[vid] = url
-            if do_lifecycle:
-                for vid, url in delist_suspects:
-                    to_fetch.setdefault(vid, url)
-
-            # --details-only backstop: pick up any active row missing raw_detail_json
-            # (e.g. a previous crashed Phase 3).
-            if details_only or (not skip_details and not to_fetch):
-                for vid, url in fetch_pending_details(conn, target_make):
-                    to_fetch.setdefault(vid, url)
-
-            # ── Detail checkpoint resume (--details-only only) ───────────────
-            # fetch_pending_details is sorted by id, so filtering by
-            # last_detail_id gives a clean resume point. Not applied for full
-            # scans where to_fetch ordering is not strictly by id.
-            if details_only:
-                last_detail_id = load_detail_checkpoint()
-                if last_detail_id is not None:
-                    before = len(to_fetch)
-                    to_fetch = {vid: url for vid, url in to_fetch.items() if vid > last_detail_id}
-                    skipped = before - len(to_fetch)
-                    if skipped:
+            makes = all_makes
+            resume_from_page = 1
+            last_make, saved_page = _load_listing_progress(ckpt_key)
+            if last_make:
+                idx = next(
+                    (i for i, m in enumerate(makes) if m["name"] == last_make),
+                    -1,
+                )
+                if idx >= 0:
+                    if saved_page > 1:
+                        makes = makes[idx:]
+                        resume_from_page = saved_page
                         log.info(
-                            f"Phase 3: resuming from detail checkpoint "
-                            f"(last id={last_detail_id}, skipping {skipped} already-done)"
+                            f"Resuming '{last_make}' from page {resume_from_page} — "
+                            f"skipping {idx} already-done makes, {len(makes)} remaining"
                         )
-            else:
-                last_detail_id = None
-
-            if skip_details:
-                log.info("Phase 3 skipped (--skip-details)")
-            elif not to_fetch:
-                log.info("Phase 3: nothing to fetch (no new/bumped/suspect rows)")
-            else:
-                log.info(
-                    f"Phase 3: fetching details for {len(to_fetch)} "
-                    f"vehicle(s) ({len(needs_detail_ids)} new/bumped, "
-                    f"{len(suspect_ids)} suspect, union of both)"
-                )
-
-                total = len(to_fetch)
-                for i, (vehicle_id, url) in enumerate(to_fetch.items(), 1):
-                    if i % 50 == 0 or i == total:
-                        log.info(f"  Details: {i}/{total}")
-                    try:
-                        detail = scrape_detail(detail_page, url)
-                    except Exception as e:
-                        log.warning(f"  Detail fetch failed for {url}: {e}")
-                        continue
-
-                    if not detail:
-                        continue
-
-                    if detail.get("delisted"):
-                        # Delisted → finalise + capture final VC in one shot.
-                        try:
-                            mark_delisted(conn, vehicle_id)
-                            scraped_vc = detail.get("view_count_scraped")
-                            if scraped_vc is not None:
-                                persist_view_count(conn, vehicle_id, scraped_vc)
-                        except Exception as e:
-                            log.warning(
-                                f"  delisted handling failed for vehicle "
-                                f"{vehicle_id}: {e}"
-                            )
                     else:
-                        # Live listing — full detail update (specs, VC, M2M, …).
-                        try:
-                            update_vehicle_detail(conn, vehicle_id, detail)
-                        except Exception as e:
-                            log.warning(
-                                f"  update_vehicle_detail failed for vehicle "
-                                f"{vehicle_id}: {e}"
-                            )
-                            continue
-                        # Suspect came back not-delisted → could be paginator
-                        # lag; defer to Phase 4's two-miss guard.
-                        if vehicle_id in suspect_ids:
-                            still_absent_not_delisted.append(vehicle_id)
-
-                    # Persist detail progress after every successful vehicle so
-                    # a crash can resume from this point on the next run.
-                    if details_only:
-                        save_detail_checkpoint(vehicle_id)
-
-                if details_only:
-                    clear_detail_checkpoint()
-
-            # ── Phase 4: safety sweep (two-miss deactivation) ────────────────
-            if not do_lifecycle:
-                if skip_lifecycle:
-                    log.info("Phase 4 skipped (--skip-lifecycle)")
-            else:
-                bumped = increment_misses_for_ids(conn, still_absent_not_delisted)
-                if bumped:
-                    log.info(
-                        f"Phase 4: bumped missing_scan_count for {bumped} "
-                        f"suspect(s) that weren't delisted"
+                        makes = makes[idx + 1:]
+                        log.info(
+                            f"Resuming after completed make '{last_make}' — "
+                            f"skipping {idx + 1} already-done, {len(makes)} remaining"
+                        )
+                else:
+                    log.warning(
+                        f"Checkpoint make '{last_make}' not in current list — ignoring"
                     )
-                deactivated = run_safety_deactivate(conn)
-                counters["deactivated"] = deactivated
-                log.info(
-                    f"Phase 4: deactivated {deactivated} vehicle(s) "
-                    f"(>= 2 consecutive misses)"
+
+        log.info(f"Listing pass: scanning {len(makes)} make(s)")
+
+        for make in makes:
+            log.info(f"[make] {make['name']}")
+            committed = {"n": 0}
+            current_page = {"num": resume_from_page}
+
+            def _commit_page(vehicles_on_page, page_num):
+                # Per-page commit — preserves earlier pages if a later page
+                # times out. upsert_listing handles the per-row flagging.
+                for v in vehicles_on_page:
+                    _vid, action, _, _needs_detail = upsert_listing(
+                        conn, v, session_start=session_start
+                    )
+                    counters["found"] += 1
+                    if action == "new":
+                        counters["new"] += 1
+                    elif action == "updated":
+                        counters["updated"] += 1
+                committed["n"] += len(vehicles_on_page)
+                current_page["num"] = page_num
+                _save_listing_progress(ckpt_key, make["name"], page_num)
+
+            try:
+                vehicles = scrape_make_pages(
+                    page, make, start_page=resume_from_page, on_page_complete=_commit_page
                 )
-        finally:
-            if detail_page is not None:
-                browser.close_page(detail_page)
+                log.info(
+                    f"  {make['name']}: {len(vehicles)} found, "
+                    f"{committed['n']} committed"
+                )
+            except Exception as e:
+                log.error(
+                    f"  {make['name']} failed after page {current_page['num']}, "
+                    f"committed {committed['n']} vehicles: {e}"
+                )
+                continue
+            finally:
+                _save_listing_progress(ckpt_key, make["name"])
+                resume_from_page = 1
+
+        _clear_checkpoint(ckpt_key)
+
+        # Persist counters mid-session so a crash between here and
+        # finish_session() still leaves something in scrape_jobs.
+        update_session(
+            conn,
+            session_id,
+            listings_found=counters["found"],
+            listings_new=counters["new"],
+            listings_updated=counters["updated"],
+        )
+
+        # ── Phase 2: classify delist-suspects ────────────────────────────────
+        # Side effect: every suspect gets needs_detail_refresh=TRUE so the
+        # next Details Update will fetch its detail page and either confirm
+        # delisted (mark_delisted) or simply refresh data.
+        suspects = select_delist_suspects(conn, session_start, target_make)
+        log.info(
+            f"Phase 2: {len(suspects)} delist-suspect(s) flagged for detail refresh"
+        )
+
+        # ── Phase 3: two-miss safety deactivate ──────────────────────────────
+        # Bump missing_scan_count for every suspect; bulk-deactivate at >= 2.
+        # A row that's truly delisted will be mark_delisted by Details Update
+        # (faster path), but two-miss is the safety net for cases where the
+        # detail page is unreachable or the user skips Details Update.
+        suspect_ids = [vid for vid, _ in suspects]
+        if suspect_ids:
+            bumped = increment_misses_for_ids(conn, suspect_ids)
+            log.info(
+                f"Phase 3: bumped missing_scan_count for {bumped} suspect(s)"
+            )
+        deactivated = run_safety_deactivate(conn)
+        counters["deactivated"] = deactivated
+        log.info(
+            f"Phase 3: deactivated {deactivated} vehicle(s) "
+            f"(>= 2 consecutive misses)"
+        )
 
         session_status = "done"
-        log.info("=== Scan complete ===")
+        log.info("=== Listing pass complete ===")
 
     except Exception as e:
         session_status = "failed"
         session_error = f"{type(e).__name__}: {e}"
-        log.exception("Scan failed with unhandled exception")
+        log.exception("Listing pass failed with unhandled exception")
         raise
     finally:
         try:
@@ -770,75 +340,236 @@ def run(
         except Exception as e:
             log.warning(f"finish_session failed: {e}")
         conn.close()
+
+
+# ── Details pass ────────────────────────────────────────────────────────────
+
+
+def _run_details(
+    browser: "BrowserManager",
+    mode: str,
+    target_make: Optional[str] = None,
+) -> None:
+    """Details pass — three flavours:
+
+      mode="full"            FIFO every vehicle in DB.
+      mode="full" + make     FIFO every vehicle for that make.
+      mode="update"          FIFO only rows where needs_detail_refresh=TRUE.
+
+    Per-row:
+      - load failure        → don't advance checkpoint; retry next run.
+      - delisted marker     → mark_delisted + persist final view_count, advance.
+      - live page           → update_vehicle_detail, advance.
+      mode="update" also clears needs_detail_refresh after each successful row.
+    """
+    if mode == "update":
+        ckpt_key = "details_update"
+        sql = (
+            "SELECT id, url FROM vehicles "
+            "WHERE needs_detail_refresh = TRUE ORDER BY id ASC"
+        )
+        params: tuple = ()
+    elif mode == "full":
+        if target_make:
+            ckpt_key = "details_full_make"
+            sql = (
+                "SELECT id, url FROM vehicles "
+                "WHERE LOWER(make) = LOWER(%s) ORDER BY id ASC"
+            )
+            params = (target_make,)
+        else:
+            ckpt_key = "details_full"
+            sql = "SELECT id, url FROM vehicles ORDER BY id ASC"
+            params = ()
+    else:
+        raise ValueError(f"unknown details mode: {mode}")
+
+    conn = get_sync_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows: list[tuple[int, str]] = [(r[0], r[1]) for r in cur.fetchall()]
+
+        scope_label = (
+            "details-update queue" if mode == "update"
+            else f"make '{target_make}'" if target_make
+            else "all vehicles"
+        )
+
+        if not rows:
+            log.info(f"Details pass ({mode}): nothing to do for {scope_label}")
+            return
+
+        # Resume from per-mode checkpoint (vehicle.id, FIFO).
+        last_id = _load_details_progress(ckpt_key)
+        if last_id is not None:
+            before = len(rows)
+            rows = [(vid, url) for vid, url in rows if vid > last_id]
+            skipped = before - len(rows)
+            if skipped:
+                log.info(
+                    f"Resuming {ckpt_key} past id={last_id} "
+                    f"(skipped {skipped} already-done)"
+                )
+
+        log.info(f"Details pass ({mode}): {len(rows)} row(s) for {scope_label}")
+        detail_page = browser.new_page()
+
+        processed = delisted = load_failed = 0
+
+        try:
+            total = len(rows)
+            for i, (vehicle_id, url) in enumerate(rows, 1):
+                if i % 50 == 0 or i == total:
+                    log.info(f"  Details: {i}/{total}")
+
+                try:
+                    detail = scrape_detail(detail_page, url)
+                except Exception as e:
+                    log.warning(f"  Detail fetch failed for {url}: {e}")
+                    load_failed += 1
+                    continue
+
+                if not detail:
+                    # Page didn't load — leave checkpoint so we retry this row.
+                    load_failed += 1
+                    continue
+
+                if detail.get("delisted"):
+                    try:
+                        mark_delisted(conn, vehicle_id)
+                        scraped_vc = detail.get("view_count_scraped")
+                        if scraped_vc is not None:
+                            persist_view_count(conn, vehicle_id, scraped_vc)
+                        delisted += 1
+                    except Exception as e:
+                        log.warning(
+                            f"  delisted handling failed for vehicle "
+                            f"{vehicle_id}: {e}"
+                        )
+                        continue
+                else:
+                    try:
+                        update_vehicle_detail(
+                            conn,
+                            vehicle_id,
+                            detail,
+                            preserve_collections_if_shorter=(mode == "full"),
+                        )
+                        processed += 1
+                    except Exception as e:
+                        log.warning(
+                            f"  update_vehicle_detail failed for vehicle "
+                            f"{vehicle_id}: {e}"
+                        )
+                        continue
+
+                # Successful processing — advance checkpoint and clear queue flag.
+                _save_details_progress(ckpt_key, vehicle_id)
+                if mode == "update":
+                    try:
+                        clear_needs_detail_refresh(conn, vehicle_id)
+                    except Exception as e:
+                        log.warning(
+                            f"  clear_needs_detail_refresh failed for vehicle "
+                            f"{vehicle_id}: {e}"
+                        )
+        finally:
+            browser.close_page(detail_page)
+
+        _clear_checkpoint(ckpt_key)
+        log.info(
+            f"Details pass ({mode}) complete — processed={processed}, "
+            f"delisted={delisted}, load_failed={load_failed}"
+        )
+    finally:
+        conn.close()
+
+
+# ── Entry point ─────────────────────────────────────────────────────────────
+
+
+def run(
+    listing_full: bool = False,
+    listing_make: Optional[str] = None,
+    details_full: bool = False,
+    details_update: bool = False,
+    target_make: Optional[str] = None,
+) -> None:
+    log.info("=== turbo_market local scraper starting ===")
+    browser = BrowserManager()
+    browser.start()
+
+    try:
+        if listing_full:
+            _run_listing(browser, target_make=None)
+        elif listing_make:
+            _run_listing(browser, target_make=listing_make)
+        elif details_update:
+            _run_details(browser, mode="update")
+        elif details_full:
+            _run_details(browser, mode="full", target_make=target_make)
+        else:
+            log.error(
+                "No mode specified. Use one of: --listing-full, "
+                "--listing-make X, --details-full [--make X], --details-update"
+            )
+    finally:
         browser.stop()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="turbo_market local scraper")
-    parser.add_argument("--make", help="Scrape only this make (e.g. Toyota)")
+    parser = argparse.ArgumentParser(
+        description="turbo_market local scraper (5-mode listing/details split)",
+    )
+    mode_group = parser.add_mutually_exclusive_group(required=True)
+    mode_group.add_argument(
+        "--listing-full",
+        action="store_true",
+        help="Listing pass for all makes (Phase 1 + classify suspects + safety deactivate)",
+    )
+    mode_group.add_argument(
+        "--listing-make",
+        metavar="MAKE",
+        help="Listing pass scoped to one make (e.g. --listing-make Toyota)",
+    )
+    mode_group.add_argument(
+        "--details-full",
+        action="store_true",
+        help=(
+            "Details pass over every row in DB (FIFO by vehicle.id). "
+            "Combine with --make X to scope to one make."
+        ),
+    )
+    mode_group.add_argument(
+        "--details-update",
+        action="store_true",
+        help=(
+            "Details pass over only rows flagged needs_detail_refresh=TRUE. "
+            "Clears the flag after each successful row."
+        ),
+    )
+    parser.add_argument(
+        "--make",
+        help="Used with --details-full to scope FIFO iteration to one make",
+    )
     parser.add_argument(
         "--headless",
         action="store_true",
         help="Force headless mode — overrides SCRAPER_MODE in .env (use for cron)",
-    )
-    parser.add_argument(
-        "--fresh",
-        action="store_true",
-        help="Ignore checkpoint and start from the first make",
-    )
-    parser.add_argument(
-        "--details-only",
-        action="store_true",
-        help="Skip Phase 1 (listings) — only fetch missing detail pages",
-    )
-    parser.add_argument(
-        "--skip-details",
-        action="store_true",
-        help="Skip Phase 3 (detail pages) — listings only",
-    )
-    parser.add_argument(
-        "--skip-lifecycle",
-        action="store_true",
-        help="Skip Phase 4 (sold/removed deactivation)",
-    )
-    parser.add_argument(
-        "--inactive-details",
-        action="store_true",
-        help=(
-            "One-time backfill: fetch detail pages for inactive vehicles "
-            "with raw_detail_json IS NULL. Skips all other phases."
-        ),
-    )
-    parser.add_argument(
-        "--delete-unscrapable",
-        action="store_true",
-        help=(
-            "Used with --inactive-details: delete vehicles whose detail "
-            "page is already gone (delisted). Cleans up unrecoverable rows."
-        ),
-    )
-    parser.add_argument(
-        "--full-details",
-        action="store_true",
-        help=(
-            "Re-scrape EVERY vehicle detail page (FIFO by id). "
-            "Skips 404/delisted rows untouched; preserves images/features/"
-            "labels on thin re-scrapes. Resumes via full_detail:<turbo_id> "
-            "line in scraper_checkpoint.txt."
-        ),
     )
     args = parser.parse_args()
 
     if args.headless:
         os.environ["SCRAPER_MODE"] = "headless"
 
+    if args.make and not args.details_full:
+        parser.error("--make is only valid with --details-full")
+
     run(
+        listing_full=args.listing_full,
+        listing_make=args.listing_make,
+        details_full=args.details_full,
+        details_update=args.details_update,
         target_make=args.make,
-        fresh=args.fresh,
-        details_only=args.details_only,
-        skip_details=args.skip_details,
-        skip_lifecycle=args.skip_lifecycle,
-        inactive_details=args.inactive_details,
-        delete_unscrapable=args.delete_unscrapable,
-        full_details=args.full_details,
     )

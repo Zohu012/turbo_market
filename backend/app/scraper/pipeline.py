@@ -66,19 +66,20 @@ def upsert_listing(
 
         if row is None:
             # ── New vehicle ────────────────────────────────────────────────
+            # needs_detail_refresh=TRUE so the next Details Update run picks it up.
             cur.execute(
                 """
                 INSERT INTO vehicles
                   (turbo_id, make, model, year, price, currency, price_azn,
                    odometer, odometer_type, engine, url, status,
                    date_added, date_updated, date_updated_turbo,
-                   last_activated_at, last_seen_at)
+                   last_activated_at, last_seen_at, needs_detail_refresh)
                 VALUES
                   (%(turbo_id)s, %(make)s, %(model)s, %(year)s, %(price)s,
                    %(currency)s, %(price_azn)s, %(odometer)s, %(odometer_type)s,
                    %(engine)s, %(url)s, 'active',
                    %(now)s, %(now)s, %(date_updated_turbo)s,
-                   %(now)s, %(last_seen_at)s)
+                   %(now)s, %(last_seen_at)s, TRUE)
                 RETURNING id
                 """,
                 {
@@ -184,6 +185,10 @@ def upsert_listing(
         }
         if listing_dt is not None:
             update_fields["date_updated_turbo"] = listing_dt
+        # Queue the row for Details Update if turbo.az signalled a refresh
+        # (date_updated_turbo drift) or the row just reactivated.
+        if needs_detail:
+            update_fields["needs_detail_refresh"] = True
 
         # Filter out keys whose value is None AND we don't care about
         # overwriting with null — keep explicit Nones we set in `extra`.
@@ -217,7 +222,7 @@ def update_vehicle_detail(
 
     preserve_collections_if_shorter: when True, skip image/feature/label replacement
     if the freshly-scraped list is strictly shorter than what's already stored.
-    Used by --full-details so thin re-scrapes (common on inactive listings) don't
+    Used by Details Full so thin re-scrapes (common on inactive listings) don't
     erase historical data.
     """
     if not detail:
@@ -449,6 +454,16 @@ def mark_delisted(conn: PGConnection, vehicle_id: int) -> None:
                 (row["seller_id"],),
             )
         conn.commit()
+
+
+def clear_needs_detail_refresh(conn: PGConnection, vehicle_id: int) -> None:
+    """Clear the Details-Update queue flag after a row has been processed."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE vehicles SET needs_detail_refresh = FALSE WHERE id = %s",
+            (vehicle_id,),
+        )
+    conn.commit()
 
 
 def upsert_seller(conn: PGConnection, seller: dict) -> Optional[int]:
