@@ -207,8 +207,19 @@ def upsert_listing(
         return vehicle_id, action, price_changed, needs_detail
 
 
-def update_vehicle_detail(conn: PGConnection, vehicle_id: int, detail: dict):
-    """Apply detail page data (specs, images, seller, features, labels) to an existing vehicle."""
+def update_vehicle_detail(
+    conn: PGConnection,
+    vehicle_id: int,
+    detail: dict,
+    preserve_collections_if_shorter: bool = False,
+):
+    """Apply detail page data (specs, images, seller, features, labels) to an existing vehicle.
+
+    preserve_collections_if_shorter: when True, skip image/feature/label replacement
+    if the freshly-scraped list is strictly shorter than what's already stored.
+    Used by --full-details so thin re-scrapes (common on inactive listings) don't
+    erase historical data.
+    """
     if not detail:
         return
 
@@ -314,7 +325,16 @@ def update_vehicle_detail(conn: PGConnection, vehicle_id: int, detail: dict):
 
         # ── Images ───────────────────────────────────────────────────────
         images = detail.get("images", [])
-        if images:
+        should_replace_images = bool(images)
+        if should_replace_images and preserve_collections_if_shorter:
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM vehicle_images WHERE vehicle_id = %s",
+                (vehicle_id,),
+            )
+            existing_n = (cur.fetchone() or {}).get("n", 0)
+            if len(images) < existing_n:
+                should_replace_images = False
+        if should_replace_images:
             cur.execute("DELETE FROM vehicle_images WHERE vehicle_id = %s", (vehicle_id,))
             psycopg2.extras.execute_values(
                 cur,
@@ -326,8 +346,16 @@ def update_vehicle_detail(conn: PGConnection, vehicle_id: int, detail: dict):
             )
 
         # ── Features / labels (M2M) ──────────────────────────────────────
-        _replace_m2m(cur, vehicle_id, detail.get("features", []), "features", "vehicle_features", "feature_id")
-        _replace_m2m(cur, vehicle_id, detail.get("labels", []), "labels", "vehicle_labels", "label_id")
+        _replace_m2m(
+            cur, vehicle_id, detail.get("features", []),
+            "features", "vehicle_features", "feature_id",
+            preserve_if_shorter=preserve_collections_if_shorter,
+        )
+        _replace_m2m(
+            cur, vehicle_id, detail.get("labels", []),
+            "labels", "vehicle_labels", "label_id",
+            preserve_if_shorter=preserve_collections_if_shorter,
+        )
 
         conn.commit()
 
@@ -533,10 +561,15 @@ def _replace_m2m(
     dim_table: str,
     join_table: str,
     join_fk: str,
+    preserve_if_shorter: bool = False,
 ) -> None:
     """
     Replace the set of M2M rows for a vehicle. Upserts names into the dim
     table, then rewrites the join rows.
+
+    preserve_if_shorter: when True, skip the replace entirely if the new
+    `names` list is strictly shorter than the existing join-row count. Used
+    by --full-details to avoid erasing features/labels on thin re-scrapes.
     """
     # Strip empties and dedupe while preserving order.
     seen: set[str] = set()
@@ -546,6 +579,15 @@ def _replace_m2m(
         if n and n not in seen:
             seen.add(n)
             clean.append(n)
+
+    if preserve_if_shorter:
+        cur.execute(
+            f"SELECT COUNT(*) AS n FROM {join_table} WHERE vehicle_id = %s",
+            (vehicle_id,),
+        )
+        existing_n = (cur.fetchone() or {}).get("n", 0)
+        if len(clean) < existing_n:
+            return
 
     # Always clear the join rows for this vehicle — even if `clean` is empty,
     # a vehicle that previously had features can have them removed.
