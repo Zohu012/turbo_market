@@ -1,1 +1,2 @@
-Changan:8
+listing_full:Hyundai:138
+details_full:147
