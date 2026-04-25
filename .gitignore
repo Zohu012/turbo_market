@@ -15,5 +15,4 @@ browser_profile/
 backend/scraper_checkpoint.txt
 .claude/
 backend/scraper_checkpoint.txt
-backend/scraper_checkpoint.txt
-backend/scraper_checkpoint.txt
+backend/scraper_failed_*.txt

@@ -11,7 +11,12 @@ Run from the backend/ directory. Exactly one mode flag must be passed:
     python scripts/run_local.py --details-update      # only rows flagged needs_detail_refresh
 
 Common flags:
-    --headless        force headless mode (overrides SCRAPER_MODE in .env)
+    --headless           force headless mode (overrides SCRAPER_MODE in .env)
+    --parallel           use the multi-worker parallel runner (always headless,
+                         ~8x faster — fits ~46k details into ~5h)
+    --workers N          parallel worker count (default 8)
+    --chunk-size N       rows per checkpoint advance in details parallel mode
+                         (default 100; smaller = less rework on Ctrl-C)
 
 Listing pass (`--listing-full` / `--listing-make`):
     1. Scrape listing pages → upsert_listing flags new / reactivated /
@@ -81,81 +86,17 @@ from app.scraper.lifecycle import (
     increment_misses_for_ids,
     run_safety_deactivate,
 )
-
-
-CHECKPOINT_FILE = Path(__file__).parent.parent / "scraper_checkpoint.txt"
-
-# Order keys are written back to disk in. Stable order keeps diffs readable.
-_CHECKPOINT_KEYS = (
-    "listing_full",
-    "listing_make",
-    "details_full",
-    "details_full_make",
-    "details_update",
+from app.scraper.checkpoint import (
+    clear_checkpoint as _clear_checkpoint,
+    load_listing_progress as _load_listing_progress,
+    save_listing_progress as _save_listing_progress,
+    load_details_progress as _load_details_progress,
+    save_details_progress as _save_details_progress,
 )
-
-
-# ── Checkpoint I/O ──────────────────────────────────────────────────────────
-
-
-def _read_checkpoint() -> dict[str, str]:
-    """Parse checkpoint file into a key→value dict. Each line is `key:value`."""
-    result: dict[str, str] = {}
-    if not CHECKPOINT_FILE.exists():
-        return result
-    for raw in CHECKPOINT_FILE.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or ":" not in line:
-            continue
-        key, _, value = line.partition(":")
-        if key in _CHECKPOINT_KEYS:
-            result[key] = value
-    return result
-
-
-def _write_checkpoint(data: dict[str, str]) -> None:
-    parts = [f"{k}:{data[k]}" for k in _CHECKPOINT_KEYS if k in data and data[k]]
-    if parts:
-        CHECKPOINT_FILE.write_text("\n".join(parts), encoding="utf-8")
-    elif CHECKPOINT_FILE.exists():
-        CHECKPOINT_FILE.unlink()
-
-
-def _set_checkpoint(key: str, value: str) -> None:
-    data = _read_checkpoint()
-    data[key] = value
-    _write_checkpoint(data)
-
-
-def _clear_checkpoint(key: str) -> None:
-    data = _read_checkpoint()
-    data.pop(key, None)
-    _write_checkpoint(data)
-
-
-def _load_listing_progress(key: str) -> tuple[Optional[str], int]:
-    """Decode `make_name:page_num` (or just `make_name`) → (make, page)."""
-    val = _read_checkpoint().get(key, "")
-    if not val:
-        return None, 1
-    idx = val.rfind(":")
-    if idx > 0 and val[idx + 1:].isdigit():
-        return val[:idx], int(val[idx + 1:])
-    return val, 1
-
-
-def _save_listing_progress(key: str, make_name: str, page_num: Optional[int] = None) -> None:
-    val = f"{make_name}:{page_num}" if page_num else make_name
-    _set_checkpoint(key, val)
-
-
-def _load_details_progress(key: str) -> Optional[int]:
-    val = _read_checkpoint().get(key, "")
-    return int(val) if val.isdigit() else None
-
-
-def _save_details_progress(key: str, vehicle_id: int) -> None:
-    _set_checkpoint(key, str(vehicle_id))
+from app.scraper.parallel import (
+    run_details_parallel,
+    run_listing_parallel,
+)
 
 
 # ── Listing pass ────────────────────────────────────────────────────────────
@@ -511,8 +452,42 @@ def run(
     details_full: bool = False,
     details_update: bool = False,
     target_make: Optional[str] = None,
+    parallel: bool = False,
+    workers: int = 8,
+    chunk_size: int = 100,
 ) -> None:
     log.info("=== turbo_market local scraper starting ===")
+
+    # Parallel paths spin up their own per-worker Playwright contexts and
+    # don't need the shared BrowserManager — skip it to save startup time
+    # and avoid an unused Chrome process.
+    if parallel:
+        log.info(f"Parallel mode: workers={workers}, chunk_size={chunk_size}")
+        if listing_full or listing_make:
+            run_listing_parallel(
+                target_make=listing_make if listing_make else None,
+                worker_count=workers,
+            )
+        elif details_update:
+            run_details_parallel(
+                mode="update",
+                worker_count=workers,
+                chunk_size=chunk_size,
+            )
+        elif details_full:
+            run_details_parallel(
+                mode="full",
+                target_make=target_make,
+                worker_count=workers,
+                chunk_size=chunk_size,
+            )
+        else:
+            log.error(
+                "No mode specified for --parallel. Use one of: --listing-full, "
+                "--listing-make X, --details-full [--make X], --details-update"
+            )
+        return
+
     browser = BrowserManager()
     browser.start()
 
@@ -574,9 +549,35 @@ if __name__ == "__main__":
         action="store_true",
         help="Force headless mode — overrides SCRAPER_MODE in .env (use for cron)",
     )
+    parser.add_argument(
+        "--parallel",
+        action="store_true",
+        help=(
+            "Use the multi-worker parallel runner (8 concurrent Chromium "
+            "contexts by default). ~8x faster, fits a full ~46k details run "
+            "into ~5 hours. Always headless — ignores SCRAPER_MODE."
+        ),
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=8,
+        help="Number of parallel workers (default: 8). Only used with --parallel.",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=100,
+        help=(
+            "Rows per checkpoint advance in details parallel mode "
+            "(default: 100). Smaller = less rework on Ctrl-C, more file I/O."
+        ),
+    )
     args = parser.parse_args()
 
-    if args.headless:
+    if args.headless or args.parallel:
+        # Parallel always runs headless — each worker launches its own
+        # persistent context and CDP-attaching across N workers isn't safe.
         os.environ["SCRAPER_MODE"] = "headless"
 
     if args.make and not args.details_full:
@@ -588,4 +589,7 @@ if __name__ == "__main__":
         details_full=args.details_full,
         details_update=args.details_update,
         target_make=args.make,
+        parallel=args.parallel,
+        workers=args.workers,
+        chunk_size=args.chunk_size,
     )

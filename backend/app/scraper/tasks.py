@@ -289,3 +289,125 @@ def on_demand_scan(self, job_id: int, target_make: Optional[str] = None, target_
         scrape_make_task.s(make, job_id, session_start_iso) for make in makes
     ]
     chord(make_tasks)(lifecycle_check_task.s(job_id))
+
+
+# ── Parallel runners (admin-triggered fast paths) ────────────────────────
+
+
+@celery_app.task(bind=True)
+def listing_parallel_task(self, job_id: int, target_make: Optional[str] = None):
+    """Run the parallel listing scraper (8 makes concurrently, 1 worker per make).
+
+    Reaches roughly 5-7x the throughput of the chord-based on_demand_scan
+    on the listing queue. Doesn't queue per-vehicle detail tasks — instead
+    flags `needs_detail_refresh=TRUE` on suspect rows for the operator to
+    sweep with details_update_parallel_task next.
+    """
+    from app.scraper.parallel import run_listing_parallel
+
+    conn = get_sync_conn()
+    try:
+        result = run_listing_parallel(target_make=target_make, worker_count=8)
+        _update_job_status(
+            conn,
+            job_id,
+            status="done",
+            finished_at=datetime.now(timezone.utc),
+            listings_found=result.get("found", 0),
+            listings_new=result.get("new", 0),
+            listings_updated=result.get("updated", 0),
+            listings_deactivated=result.get("deactivated", 0),
+        )
+    except Exception as exc:
+        log.error(f"listing_parallel_task failed: {exc}")
+        _update_job_status(
+            conn,
+            job_id,
+            status="failed",
+            finished_at=datetime.now(timezone.utc),
+            error_message=f"{type(exc).__name__}: {exc}"[:500],
+        )
+        raise
+    finally:
+        conn.close()
+
+
+@celery_app.task(bind=True)
+def details_full_parallel_task(self, job_id: int, target_make: Optional[str] = None):
+    """Parallel details pass over every vehicle in DB (or scoped to one make).
+
+    Targets a ~5-hour wall-clock for the full ~46k catalogue (vs ~62h serial).
+    Resumes from `details_full` / `details_full_make` checkpoint per-chunk;
+    failed rows go to `scraper_failed_<key>.txt` for next-run retry.
+    """
+    from app.scraper.parallel import run_details_parallel
+
+    conn = get_sync_conn()
+    try:
+        result = run_details_parallel(
+            mode="full",
+            target_make=target_make,
+            worker_count=8,
+            chunk_size=100,
+        )
+        _update_job_status(
+            conn,
+            job_id,
+            status="done",
+            finished_at=datetime.now(timezone.utc),
+            listings_found=result.get("total", 0),
+            listings_updated=result.get("processed", 0),
+            listings_deactivated=result.get("delisted", 0),
+        )
+    except Exception as exc:
+        log.error(f"details_full_parallel_task failed: {exc}")
+        _update_job_status(
+            conn,
+            job_id,
+            status="failed",
+            finished_at=datetime.now(timezone.utc),
+            error_message=f"{type(exc).__name__}: {exc}"[:500],
+        )
+        raise
+    finally:
+        conn.close()
+
+
+@celery_app.task(bind=True)
+def details_update_parallel_task(self, job_id: int):
+    """Parallel details pass restricted to rows with needs_detail_refresh=TRUE.
+
+    Same infrastructure as details_full_parallel_task; queue is typically
+    much smaller (a few hundred to a few thousand rows after a listing run).
+    Clears needs_detail_refresh after each successful row.
+    """
+    from app.scraper.parallel import run_details_parallel
+
+    conn = get_sync_conn()
+    try:
+        result = run_details_parallel(
+            mode="update",
+            worker_count=8,
+            chunk_size=100,
+        )
+        _update_job_status(
+            conn,
+            job_id,
+            status="done",
+            finished_at=datetime.now(timezone.utc),
+            listings_found=result.get("total", 0),
+            listings_updated=result.get("processed", 0),
+            listings_deactivated=result.get("delisted", 0),
+        )
+    except Exception as exc:
+        log.error(f"details_update_parallel_task failed: {exc}")
+        _update_job_status(
+            conn,
+            job_id,
+            status="failed",
+            finished_at=datetime.now(timezone.utc),
+            error_message=f"{type(exc).__name__}: {exc}"[:500],
+        )
+        raise
+    finally:
+        conn.close()

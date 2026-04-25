@@ -159,13 +159,14 @@ def scrape_detail(page: Page, url: str) -> dict:
     If the listing is delisted, returns {"delisted": True} — callers should
     mark the vehicle inactive WITHOUT overwriting its existing data.
     """
-    # One retry on timeout — flaky navigation is common on detail pages,
-    # but 60s total (30s + 30s) is still cheaper than losing the vehicle.
+    # One retry on timeout. With parallel workers (8 concurrent contexts),
+    # fail-fast is cheaper than a long blocking wait — the row gets re-queued
+    # to scraper_failed_<key>.txt and retried on the next run.
     loaded = False
     last_err: Optional[Exception] = None
     for attempt in range(2):
         try:
-            page.goto(url, wait_until="load", timeout=45_000)
+            page.goto(url, wait_until="load", timeout=25_000)
             wait_for_cloudflare(page)
             loaded = True
             break
@@ -174,7 +175,7 @@ def scrape_detail(page: Page, url: str) -> dict:
             if attempt == 0:
                 log.info(f"  Retry detail load: {url}")
                 try:
-                    page.wait_for_timeout(2_000)
+                    page.wait_for_timeout(1_000)
                 except Exception:
                     pass
     if not loaded:

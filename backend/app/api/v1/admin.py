@@ -17,7 +17,14 @@ async def trigger_scrape(
     body: TriggerRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    from app.scraper.tasks import on_demand_scan, daily_full_scan, lifecycle_check_task
+    from app.scraper.tasks import (
+        on_demand_scan,
+        daily_full_scan,
+        lifecycle_check_task,
+        listing_parallel_task,
+        details_full_parallel_task,
+        details_update_parallel_task,
+    )
 
     job = await create_job(
         db,
@@ -28,9 +35,27 @@ async def trigger_scrape(
     )
 
     if body.job_type == "lifecycle_check":
-        celery_result = lifecycle_check_task.apply_async(args=[[]], kwargs={"job_id": job.id}, queue="listing")
+        celery_result = lifecycle_check_task.apply_async(
+            args=[[]], kwargs={"job_id": job.id}, queue="listing"
+        )
     elif body.job_type == "full_scan":
         celery_result = daily_full_scan.apply_async(queue="listing")
+    elif body.job_type == "listing_parallel":
+        celery_result = listing_parallel_task.apply_async(
+            args=[job.id],
+            kwargs={"target_make": body.target_make},
+            queue="listing",
+        )
+    elif body.job_type == "details_full_parallel":
+        celery_result = details_full_parallel_task.apply_async(
+            args=[job.id],
+            kwargs={"target_make": body.target_make},
+            queue="listing",
+        )
+    elif body.job_type == "details_update_parallel":
+        celery_result = details_update_parallel_task.apply_async(
+            args=[job.id], queue="listing",
+        )
     else:
         celery_result = on_demand_scan.apply_async(
             args=[job.id],

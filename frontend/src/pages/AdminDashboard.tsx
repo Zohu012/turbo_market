@@ -86,15 +86,26 @@ export default function AdminDashboard() {
               onChange={(e) => setJobType(e.target.value)}
               className="border rounded px-2 py-1.5 text-sm"
             >
-              <option value="make_scan">Make Scan</option>
-              <option value="full_scan">Full Scan (all makes)</option>
-              <option value="lifecycle_check">Lifecycle Check only</option>
+              <optgroup label="Standard">
+                <option value="make_scan">Make Scan</option>
+                <option value="full_scan">Full Scan (all makes)</option>
+                <option value="lifecycle_check">Lifecycle Check only</option>
+              </optgroup>
+              <optgroup label="Parallel — fast (8 workers)">
+                <option value="listing_parallel">Listing (Parallel)</option>
+                <option value="details_full_parallel">Details Full (Parallel)</option>
+                <option value="details_update_parallel">Details Update (Parallel)</option>
+              </optgroup>
             </select>
           </div>
-          {jobType === "make_scan" && (
+          {(jobType === "make_scan" ||
+            jobType === "listing_parallel" ||
+            jobType === "details_full_parallel") && (
             <>
               <div>
-                <label className="text-xs text-gray-500 block mb-1">Make</label>
+                <label className="text-xs text-gray-500 block mb-1">
+                  Make {jobType !== "make_scan" && "(optional)"}
+                </label>
                 <input
                   className="border rounded px-2 py-1.5 text-sm"
                   placeholder="e.g. Toyota"
@@ -102,15 +113,17 @@ export default function AdminDashboard() {
                   onChange={(e) => setTriggerMake(e.target.value)}
                 />
               </div>
-              <div>
-                <label className="text-xs text-gray-500 block mb-1">Model (optional)</label>
-                <input
-                  className="border rounded px-2 py-1.5 text-sm"
-                  placeholder="e.g. Camry"
-                  value={triggerModel}
-                  onChange={(e) => setTriggerModel(e.target.value)}
-                />
-              </div>
+              {jobType === "make_scan" && (
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">Model (optional)</label>
+                  <input
+                    className="border rounded px-2 py-1.5 text-sm"
+                    placeholder="e.g. Camry"
+                    value={triggerModel}
+                    onChange={(e) => setTriggerModel(e.target.value)}
+                  />
+                </div>
+              )}
             </>
           )}
           <button
@@ -120,6 +133,11 @@ export default function AdminDashboard() {
           >
             {submitting ? "Triggering..." : "▶ Run Now"}
           </button>
+          {jobType.endsWith("_parallel") && (
+            <span className="text-xs text-purple-600 bg-purple-50 px-2 py-1 rounded font-medium">
+              ⚡ Parallel — 8 workers
+            </span>
+          )}
           <button onClick={loadData} className="px-3 py-1.5 border rounded text-sm hover:bg-gray-50">
             ↻ Refresh
           </button>

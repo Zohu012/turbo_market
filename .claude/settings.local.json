@@ -5,7 +5,10 @@
       "Bash(py -3 -m py_compile app/models/vehicle.py app/models/seller.py app/models/__init__.py app/scraper/listing_scraper.py app/scraper/detail_scraper.py app/scraper/pipeline.py app/scraper/lifecycle.py app/scraper/tasks.py app/scraper/seller_classifier.py alembic/versions/0002_detail_fields_and_history.py)",
       "Bash(ls backend/tests/)",
       "Bash(find backend *)",
-      "Bash(py -3 -m py_compile app/scraper/seller_classifier.py)"
+      "Bash(py -3 -m py_compile app/scraper/seller_classifier.py)",
+      "Bash(python -m py_compile backend/app/scraper/checkpoint.py backend/app/scraper/parallel.py backend/app/scraper/tasks.py backend/app/scraper/detail_scraper.py backend/scripts/run_local.py backend/app/api/v1/admin.py)",
+      "Bash(py -m py_compile backend/app/scraper/checkpoint.py backend/app/scraper/parallel.py backend/app/scraper/tasks.py backend/app/scraper/detail_scraper.py backend/scripts/run_local.py backend/app/api/v1/admin.py)",
+      "Bash(npx tsc *)"
     ]
   }
 }
