@@ -181,45 +181,26 @@ def scrape_detail(page: Page, url: str) -> dict:
         log.warning(f"Failed to load {url}: {last_err}")
         return {}
 
-    # Cheap delisted check up front — skips all the parsing below if the
-    # listing has been removed. Caller will preserve existing DB data.
-    # Exception: turbo.az still shows the view count on delisted pages, so
-    # pull it from the statistics strip to give lifecycle a final VC snapshot.
-    if _detect_delisted(page):
-        result: dict = {"delisted": True}
+    delisted = _detect_delisted(page)
+    data: dict = {"delisted": delisted}
+
+    # ── Images (live pages only — delisted pages have no photo gallery) ─────────
+    if not delisted:
         try:
-            stat_texts = page.eval_on_selector_all(
-                ".product-statistics__i-text",
-                "els => els.map(e => e.textContent.trim())",
+            images = page.eval_on_selector_all(
+                ".product-photos__list img, .product-photos img, .photo-gallery img",
+                "els => els.map(e => e.getAttribute('src') || e.getAttribute('data-src') || '').filter(Boolean)"
             )
-            for text in stat_texts:
-                m = re.search(r"baxışların sayı:\s*(\d+)", text, re.IGNORECASE)
-                if m:
-                    result["view_count_scraped"] = int(m.group(1))
-                    break
-        except Exception:
-            pass
-        return result
-
-    data: dict = {}
-
-    # ── Images ──────────────────────────────────────────────────────────────────
-    try:
-        images = page.eval_on_selector_all(
-            ".product-photos__list img, .product-photos img, .photo-gallery img",
-            "els => els.map(e => e.getAttribute('src') || e.getAttribute('data-src') || '').filter(Boolean)"
-        )
-        # Deduplicate while preserving order.
-        seen = set()
-        unique_images = []
-        for img in images:
-            if img not in seen and ("turbo.az" in img or img.startswith("https://")):
-                seen.add(img)
-                unique_images.append(img)
-        data["images"] = unique_images
-    except Exception as e:
-        log.debug(f"Images parse error for {url}: {e}")
-        data["images"] = []
+            seen = set()
+            unique_images = []
+            for img in images:
+                if img not in seen and ("turbo.az" in img or img.startswith("https://")):
+                    seen.add(img)
+                    unique_images.append(img)
+            data["images"] = unique_images
+        except Exception as e:
+            log.debug(f"Images parse error for {url}: {e}")
+            data["images"] = []
 
     # ── Spec table ──────────────────────────────────────────────────────────────
     try:
@@ -314,63 +295,63 @@ def scrape_detail(page: Page, url: str) -> dict:
     except Exception as e:
         log.debug(f"Statistics parse error for {url}: {e}")
 
-    # ── Features (ABS, Lyuk, Kondisioner, …) ────────────────────────────────────
-    try:
-        features = page.eval_on_selector_all(
-            "ul.product-extras li.product-extras__i, .product-extras__i",
-            "els => els.map(e => e.textContent.trim()).filter(Boolean)",
-        )
-        # Deduplicate in-order
-        seen_f = set()
-        dedup_f: list[str] = []
-        for f in features:
-            if f not in seen_f:
-                seen_f.add(f)
-                dedup_f.append(f)
-        data["features"] = dedup_f
-    except Exception as e:
-        log.debug(f"Features parse error for {url}: {e}")
-        data["features"] = []
+    # ── Features / labels / seller / on-order — live pages only ────────────────
+    # These blocks live inside .product-sidebar__box which is absent on delisted
+    # pages (its absence is one of our delisted detection signals).
+    if not delisted:
+        try:
+            features = page.eval_on_selector_all(
+                "ul.product-extras li.product-extras__i, .product-extras__i",
+                "els => els.map(e => e.textContent.trim()).filter(Boolean)",
+            )
+            seen_f = set()
+            dedup_f: list[str] = []
+            for f in features:
+                if f not in seen_f:
+                    seen_f.add(f)
+                    dedup_f.append(f)
+            data["features"] = dedup_f
+        except Exception as e:
+            log.debug(f"Features parse error for {url}: {e}")
+            data["features"] = []
 
-    # ── Labels (Kredit, Barter, …) ──────────────────────────────────────────────
-    try:
-        labels = page.eval_on_selector_all(
-            ".product-labels .product-labels__i",
-            "els => els.map(e => e.textContent.trim()).filter(Boolean)",
-        )
-        seen_l = set()
-        dedup_l: list[str] = []
-        for lbl in labels:
-            if lbl not in seen_l:
-                seen_l.add(lbl)
-                dedup_l.append(lbl)
-        data["labels"] = dedup_l
-    except Exception as e:
-        log.debug(f"Labels parse error for {url}: {e}")
-        data["labels"] = []
+        try:
+            labels = page.eval_on_selector_all(
+                ".product-labels .product-labels__i",
+                "els => els.map(e => e.textContent.trim()).filter(Boolean)",
+            )
+            seen_l = set()
+            dedup_l: list[str] = []
+            for lbl in labels:
+                if lbl not in seen_l:
+                    seen_l.add(lbl)
+                    dedup_l.append(lbl)
+            data["labels"] = dedup_l
+        except Exception as e:
+            log.debug(f"Labels parse error for {url}: {e}")
+            data["labels"] = []
 
-    # ── On-order sidebar variant (Sifarişlə) ────────────────────────────────────
-    is_on_order = False
-    try:
-        is_on_order = page.query_selector(".product-shop__status_order") is not None
-    except Exception:
-        pass
-    data["is_on_order"] = is_on_order
+        is_on_order = False
+        try:
+            is_on_order = page.query_selector(".product-shop__status_order") is not None
+        except Exception:
+            pass
+        data["is_on_order"] = is_on_order
+        if is_on_order:
+            _fill_on_order_pricing(page, data)
 
-    if is_on_order:
-        _fill_on_order_pricing(page, data)
+        try:
+            seller_data = _parse_seller(page)
+            data["seller"] = seller_data
+            if not data.get("city"):
+                data["city"] = seller_data.get("city")
+        except Exception as e:
+            log.debug(f"Seller parse error for {url}: {e}")
+            data["seller"] = {}
+    else:
+        is_on_order = False
 
-    # ── Seller ──────────────────────────────────────────────────────────────────
-    try:
-        seller_data = _parse_seller(page)
-        data["seller"] = seller_data
-        if not data.get("city"):
-            data["city"] = seller_data.get("city")
-    except Exception as e:
-        log.debug(f"Seller parse error for {url}: {e}")
-        data["seller"] = {}
-
-    # ── Store raw dump ───────────────────────────────────────────────────────────
+    # ── Raw JSON dump (specs always, collections only when live) ─────────────────
     data["raw_detail_json"] = {
         "specs": data.get("specs", {}),
         "images": data.get("images", []),
