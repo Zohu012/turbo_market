@@ -66,41 +66,12 @@ BROWSER_PROFILE_DIR = Path(__file__).parent.parent.parent / "browser_profile"
 # Playwright sync_api creates an internal asyncio event loop on start(); calling
 # it from multiple threads simultaneously on Windows causes "thread initializer
 # failed" and breaks the entire pool. Serialize browser startups with this lock.
+#
+# Note: Playwright objects (Playwright, Browser, Context, Page) are thread-bound
+# via greenlets. They CANNOT be shared across threads — every worker must own
+# its own full stack. In CDP mode we open multiple parallel CDP connections
+# against the same Chrome instance (Chrome supports this fine).
 _PLAYWRIGHT_INIT_LOCK = threading.Lock()
-
-# In CDP mode, every worker connects to the SAME running Chrome (at CDP_URL)
-# and shares its existing context — preserves accumulated Cloudflare trust.
-# Each worker still owns its own Page so concurrent fetches don't collide.
-_CDP_SHARED_LOCK = threading.Lock()
-_CDP_SHARED: dict = {"playwright": None, "browser": None, "context": None}
-
-
-def _get_shared_cdp_context():
-    """Lazily create one shared (Playwright, Browser, Context) for all workers
-    in CDP mode. Each worker calls this and then opens its own Page on the
-    returned context."""
-    with _CDP_SHARED_LOCK:
-        if _CDP_SHARED["context"] is None:
-            pw = sync_playwright().start()
-            br = pw.chromium.connect_over_cdp(settings.cdp_url)
-            ctx = br.contexts[0] if br.contexts else br.new_context()
-            _CDP_SHARED["playwright"] = pw
-            _CDP_SHARED["browser"] = br
-            _CDP_SHARED["context"] = ctx
-        return _CDP_SHARED["context"]
-
-
-def _stop_shared_cdp():
-    with _CDP_SHARED_LOCK:
-        try:
-            # Don't close the user's Chrome — only release Playwright's grip.
-            if _CDP_SHARED["playwright"]:
-                _CDP_SHARED["playwright"].stop()
-        except Exception:
-            pass
-        _CDP_SHARED["playwright"] = None
-        _CDP_SHARED["browser"] = None
-        _CDP_SHARED["context"] = None
 
 # After this many consecutive load failures, a worker is considered poisoned
 # (stuck CF challenge, bad IP, etc.) and its context is torn down + recreated.
@@ -118,15 +89,29 @@ class WorkerBrowser:
     def __init__(self, worker_id: int):
         self.worker_id = worker_id
         self._playwright = None
+        self._browser = None  # only set in CDP mode
         self._context = None
         self._page = None
 
     def start(self) -> "WorkerBrowser":
         if settings.scraper_mode == "cdp":
-            # All workers share the user's Chrome via CDP — each gets its own
-            # Page on the shared context. Avoids hangs / Defender issues with
-            # headless launch and reuses any CF trust the user's Chrome has.
-            self._context = _get_shared_cdp_context()
+            # Each worker opens its OWN CDP connection to the user's Chrome.
+            # Playwright objects are thread-bound (greenlet) — sharing across
+            # workers raises "Cannot switch to a different thread". Multiple
+            # CDP connections to one Chrome instance is supported.
+            with _PLAYWRIGHT_INIT_LOCK:
+                self._playwright = sync_playwright().start()
+                self._browser = self._playwright.chromium.connect_over_cdp(
+                    settings.cdp_url
+                )
+            # Reuse the existing context (preserves the user's CF trust /
+            # cookies). Each worker opens its own Page on it; pages share
+            # cookies but are independent objects.
+            self._context = (
+                self._browser.contexts[0]
+                if self._browser.contexts
+                else self._browser.new_context()
+            )
             self._page = self._context.new_page()
             BrowserManager.block_media(self._page)
             return self
@@ -187,27 +172,31 @@ class WorkerBrowser:
         self.start()
 
     def stop(self) -> None:
-        # In CDP mode the context belongs to the user's Chrome (shared across
-        # workers) — only close our own page and leave the rest alone.
-        if settings.scraper_mode == "cdp":
-            try:
-                if self._page:
-                    self._page.close()
-            except Exception:
-                pass
-            self._page = self._context = self._playwright = None
-            return
+        # Close in inside-out order. For CDP, browser.close() disconnects the
+        # CDP session but does NOT terminate the user's Chrome process.
         try:
-            if self._context:
-                self._context.close()
+            if self._page:
+                self._page.close()
         except Exception:
             pass
+        if settings.scraper_mode == "cdp":
+            try:
+                if self._browser:
+                    self._browser.close()
+            except Exception:
+                pass
+        else:
+            try:
+                if self._context:
+                    self._context.close()
+            except Exception:
+                pass
         try:
             if self._playwright:
                 self._playwright.stop()
         except Exception:
             pass
-        self._page = self._context = self._playwright = None
+        self._page = self._context = self._browser = self._playwright = None
 
 
 # ── Details parallel runner ────────────────────────────────────────────────
@@ -539,8 +528,6 @@ def run_details_parallel(
                     c.close()
                 except Exception:
                     pass
-        if settings.scraper_mode == "cdp":
-            _stop_shared_cdp()
         if is_main_thread and old_handler is not None:
             signal.signal(signal.SIGINT, old_handler)
 
@@ -764,8 +751,6 @@ def run_listing_parallel(
                     c.close()
                 except Exception:
                     pass
-        if settings.scraper_mode == "cdp":
-            _stop_shared_cdp()
         if is_main_thread and old_handler is not None:
             signal.signal(signal.SIGINT, old_handler)
         try:
