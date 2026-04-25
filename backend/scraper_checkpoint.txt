@@ -1,2 +1,3 @@
 listing_full:JETOUR:1
-details_full:2849
+details_full:658
+details_full_parallel:2849
