@@ -121,6 +121,14 @@ HTML = """<!DOCTYPE html>
         <button id="btn-listing-make">Listing by make</button>
         <button id="btn-details-make" class="secondary">Details by make</button>
       </div>
+      <div class="row" style="margin-top: 14px; padding-top: 12px; border-top: 1px solid #2a2e36;">
+        <label style="color:#a78bfa; font-weight:600;">⚡ Parallel (fast):</label>
+        <button id="btn-listing-parallel" style="background:#7c3aed;" title="Per-make parallelism — 8 workers scrape 8 makes concurrently. Always headless. Resumes from listing_full checkpoint at make boundaries.">Listing Full ⚡</button>
+        <button id="btn-details-full-parallel" style="background:#7c3aed;" title="8 workers process the FIFO details queue concurrently. Targets ~5h for the full ~46k catalogue (vs ~62h serial). Per-make scoping when a make is selected. Chunk-based checkpoint advance every 100 rows.">Details Full ⚡</button>
+        <button id="btn-details-update-parallel" style="background:#7c3aed;" title="8-worker parallel sweep of needs_detail_refresh=TRUE rows. Same fast path as Details Full ⚡, scoped to the refresh queue.">Details Update ⚡</button>
+        <label style="margin-left:12px;">workers</label>
+        <input type="number" id="parallel-workers" value="8" min="1" max="20" style="width:60px;" title="Number of concurrent Playwright workers (each with its own persistent profile dir). Conservative: 6-8. Aggressive: 12-16 (more RAM, higher CF risk)." />
+      </div>
       <div class="row" style="margin-top: 14px;">
         <button id="btn-stop" class="danger" disabled>Stop</button>
       </div>
@@ -193,7 +201,9 @@ async function refreshStatus() {
     $('stat-last').textContent = s.last_update ? new Date(s.last_update).toLocaleString() : '—';
     $('stat-pid').textContent = s.pid || '—';
 
-    ['btn-listing-full','btn-listing-make','btn-details-full','btn-details-update','btn-details-make'].forEach(id => $(id).disabled = s.running);
+    ['btn-listing-full','btn-listing-make','btn-details-full','btn-details-update','btn-details-make',
+     'btn-listing-parallel','btn-details-full-parallel','btn-details-update-parallel'
+    ].forEach(id => $(id).disabled = s.running);
     $('btn-stop').disabled = !s.running;
 
     // Log
@@ -259,6 +269,26 @@ $('btn-details-make').onclick = () => {
   if (!m) { alert('Pick a make first'); return; }
   if (!confirm(`Details by make re-scrapes every "${m}" vehicle (FIFO by id). Safe to stop and resume. Continue?`)) return;
   start({ mode: 'details-make', make: m });
+};
+
+function _workers() {
+  const n = parseInt($('parallel-workers').value || '8', 10);
+  return (Number.isFinite(n) && n > 0 && n <= 20) ? n : 8;
+}
+$('btn-listing-parallel').onclick = () => {
+  const m = $('make-select').value;
+  if (!confirm(`Run Listing ${m ? `for "${m}" ` : ''}with ${_workers()} parallel workers? Always headless. Resumes from listing_full checkpoint at make boundaries.`)) return;
+  start({ mode: m ? 'listing-make' : 'listing-full', make: m || '', parallel: '1', workers: _workers() });
+};
+$('btn-details-full-parallel').onclick = () => {
+  const m = $('make-select').value;
+  const target = m ? `every "${m}" vehicle` : 'every vehicle in DB';
+  if (!confirm(`Details Full ⚡ re-scrapes ${target} with ${_workers()} parallel workers. ~5h for full ~46k. Safe to stop and resume (loses ≤100 rows of in-flight work). Continue?`)) return;
+  start({ mode: m ? 'details-make' : 'details-full', make: m || '', parallel: '1', workers: _workers() });
+};
+$('btn-details-update-parallel').onclick = () => {
+  if (!confirm(`Details Update ⚡ sweeps the needs_detail_refresh=TRUE queue with ${_workers()} parallel workers. Continue?`)) return;
+  start({ mode: 'details-update', parallel: '1', workers: _workers() });
 };
 $('btn-stop').onclick = async () => {
   if (!confirm('Stop scraper?')) return;
@@ -366,8 +396,16 @@ def api_status():
 def api_start(
     mode: str = Query(...),
     make: str | None = Query(None),
+    parallel: str | None = Query(None),
+    workers: int | None = Query(None),
+    chunk_size: int | None = Query(None),
 ):
-    """mode: listing-full | listing-make | details-full | details-update | details-make"""
+    """mode: listing-full | listing-make | details-full | details-update | details-make
+
+    `parallel` (truthy "1"/"true") routes to the multi-worker runner in
+    backend/app/scraper/parallel.py. `workers` and `chunk_size` are forwarded
+    when set; defaults are 8 and 100 respectively.
+    """
     global _proc
     if _proc is not None and _proc.poll() is None:
         return JSONResponse({"error": "scraper is already running"}, status_code=400)
@@ -389,6 +427,13 @@ def api_start(
         args += ["--details-update"]
     else:
         return JSONResponse({"error": f"unknown mode: {mode}"}, status_code=400)
+
+    if parallel and parallel.lower() in ("1", "true", "yes"):
+        args.append("--parallel")
+        if workers:
+            args += ["--workers", str(workers)]
+        if chunk_size:
+            args += ["--chunk-size", str(chunk_size)]
 
     # Fresh start wipes the log so the UI shows only this run
     try:
