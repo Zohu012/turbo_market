@@ -1,2 +1,2 @@
-listing_full:Hyundai:138
-details_full:147
+listing_full:JETOUR:1
+details_full:90
