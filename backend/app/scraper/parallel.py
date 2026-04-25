@@ -62,6 +62,11 @@ log = logging.getLogger(__name__)
 # accumulates its own Cloudflare trust without stepping on the others.
 BROWSER_PROFILE_DIR = Path(__file__).parent.parent.parent / "browser_profile"
 
+# Playwright sync_api creates an internal asyncio event loop on start(); calling
+# it from multiple threads simultaneously on Windows causes "thread initializer
+# failed" and breaks the entire pool. Serialize browser startups with this lock.
+_PLAYWRIGHT_INIT_LOCK = threading.Lock()
+
 # After this many consecutive load failures, a worker is considered poisoned
 # (stuck CF challenge, bad IP, etc.) and its context is torn down + recreated.
 _WORKER_RESET_THRESHOLD = 5
@@ -82,7 +87,8 @@ class WorkerBrowser:
         self._page = None
 
     def start(self) -> "WorkerBrowser":
-        self._playwright = sync_playwright().start()
+        with _PLAYWRIGHT_INIT_LOCK:
+            self._playwright = sync_playwright().start()
         profile_dir = BROWSER_PROFILE_DIR / f"worker_{self.worker_id}"
         profile_dir.mkdir(parents=True, exist_ok=True)
 
@@ -252,7 +258,15 @@ def run_details_parallel(
             wid = worker_id_counter["n"]
             worker_id_counter["n"] += 1
         log.info(f"  worker {wid}: starting...")
-        browser = WorkerBrowser(wid).start()
+        try:
+            browser = WorkerBrowser(wid).start()
+        except Exception as e:
+            log.error(f"  worker {wid}: browser init failed — {e}")
+            # Mark thread as broken so _process_row skips gracefully.
+            thread_local.browser = None
+            thread_local.conn = None
+            thread_local.consecutive_failures = 0
+            return
         conn = get_sync_conn()
         with workers_lock:
             worker_browsers.append(browser)
@@ -282,6 +296,12 @@ def run_details_parallel(
             return
         browser = thread_local.browser
         conn = thread_local.conn
+        if browser is None:
+            with counters_lock:
+                counters["load_failed"] += 1
+            with failed_lock:
+                failed_in_chunk.append(vehicle_id)
+            return
         page = browser.page()
 
         try:
@@ -504,7 +524,13 @@ def run_listing_parallel(
             wid = worker_id_counter["n"]
             worker_id_counter["n"] += 1
         log.info(f"  listing worker {wid}: starting...")
-        browser = WorkerBrowser(wid).start()
+        try:
+            browser = WorkerBrowser(wid).start()
+        except Exception as e:
+            log.error(f"  listing worker {wid}: browser init failed — {e}")
+            thread_local.browser = None
+            thread_local.conn = None
+            return
         conn = get_sync_conn()
         with workers_lock:
             worker_browsers.append(browser)
@@ -515,6 +541,9 @@ def run_listing_parallel(
     def _process_make(make: dict):
         browser = thread_local.browser
         conn = thread_local.conn
+        if browser is None:
+            log.error(f"  {make['name']}: skipped — worker has no browser")
+            return
         page = browser.page()
         committed_n = 0
         local_counters = {"found": 0, "new": 0, "updated": 0}
