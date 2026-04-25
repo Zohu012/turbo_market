@@ -448,6 +448,20 @@ def _run_details(
                             f"{vehicle_id}: {e}"
                         )
                         continue
+                    # Backfill any spec fields the delisted page still carries
+                    # (hp, condition, market_for, date_updated_turbo, raw_detail_json).
+                    # preserve_collections_if_shorter=True means empty lists from the
+                    # delisted page never replace existing images/features/labels.
+                    try:
+                        update_vehicle_detail(
+                            conn, vehicle_id, detail,
+                            preserve_collections_if_shorter=True,
+                        )
+                    except Exception as e:
+                        log.warning(
+                            f"  delisted spec backfill failed for vehicle "
+                            f"{vehicle_id}: {e}"
+                        )
                 else:
                     try:
                         update_vehicle_detail(
