@@ -24,6 +24,7 @@ import concurrent.futures
 import logging
 import signal
 import threading
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -245,8 +246,29 @@ def run_details_parallel(
         f"workers={worker_count}, chunk_size={chunk_size}"
     )
 
+    # ── Pre-flight check: try starting one browser in the main thread first.
+    # If this fails, parallel mode has no chance — fail loudly with full
+    # traceback rather than silently marking every row as load_failed.
+    log.info("Pre-flight: starting one browser to verify environment...")
+    try:
+        _preflight = WorkerBrowser(worker_id=0).start()
+        _preflight.stop()
+        log.info("Pre-flight OK — browser launches cleanly.")
+    except Exception as e:
+        log.error(
+            "Pre-flight FAILED — WorkerBrowser cannot launch. "
+            "Aborting parallel run.\n"
+            f"Exception: {type(e).__name__}: {e}\n"
+            f"Traceback:\n{traceback.format_exc()}"
+        )
+        raise RuntimeError(
+            f"Parallel pre-flight failed: {type(e).__name__}: {e}"
+        ) from e
+
     # ── Worker state ──
     thread_local = threading.local()
+    init_success_count = {"n": 0}
+    init_success_lock = threading.Lock()
     worker_id_counter = {"n": 0}
     worker_id_lock = threading.Lock()
     worker_browsers: list[WorkerBrowser] = []
@@ -261,19 +283,38 @@ def run_details_parallel(
         try:
             browser = WorkerBrowser(wid).start()
         except Exception as e:
-            log.error(f"  worker {wid}: browser init failed — {e}")
-            # Mark thread as broken so _process_row skips gracefully.
+            log.error(
+                f"  worker {wid}: browser init FAILED — "
+                f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            )
             thread_local.browser = None
             thread_local.conn = None
             thread_local.consecutive_failures = 0
             return
-        conn = get_sync_conn()
+        try:
+            conn = get_sync_conn()
+        except Exception as e:
+            log.error(
+                f"  worker {wid}: DB connection FAILED — "
+                f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            )
+            try:
+                browser.stop()
+            except Exception:
+                pass
+            thread_local.browser = None
+            thread_local.conn = None
+            thread_local.consecutive_failures = 0
+            return
         with workers_lock:
             worker_browsers.append(browser)
             worker_conns.append(conn)
         thread_local.browser = browser
         thread_local.conn = conn
         thread_local.consecutive_failures = 0
+        with init_success_lock:
+            init_success_count["n"] += 1
+        log.info(f"  worker {wid}: ready ({init_success_count['n']}/{worker_count})")
 
     # ── Stop handling ──
     stop_event = threading.Event()
@@ -417,6 +458,22 @@ def run_details_parallel(
                     f"delisted={counters['delisted']} "
                     f"load_failed={counters['load_failed']})"
                 )
+
+                # Bail out early if the first chunk shows ALL rows failing.
+                # Every load = ~100ms minimum; if 100 rows all "fail" in
+                # well under that, workers are silently skipping and we'd
+                # otherwise burn through the whole queue trashing the
+                # checkpoint. Force a stop so the user sees the issue.
+                if done == len(chunk) and counters["processed"] == 0 and counters["delisted"] == 0:
+                    log.error(
+                        f"ABORT: first chunk had 0 successes / "
+                        f"{counters['load_failed']} failures. "
+                        f"Workers initialized: {init_success_count['n']}/{worker_count}. "
+                        "Check 'browser init FAILED' / 'DB connection FAILED' "
+                        "messages above for the root cause."
+                    )
+                    stop_event.set()
+                    break
 
     finally:
         # Teardown order: futures already drained by executor exit.
