@@ -4,13 +4,19 @@ Shared checkpoint I/O for the scraper.
 Layout of `backend/scraper_checkpoint.txt`:
     listing_full:Chevrolet:75
     listing_make:BMW:12
+    listing_full_parallel:Hyundai:3
+    listing_make_parallel:Audi:1
     details_full:11761
     details_full_make:Chevrolet:11761
     details_update:5234
+    details_full_parallel:18002
+    details_full_make_parallel:BMW:18002
+    details_update_parallel:7400
 
 Each line is `key:value`. Listing keys store `make[:page]`; details keys store
-the highest fully-completed `vehicle.id`. Used by both the serial (run_local.py)
-and parallel (parallel.py) code paths so a switch between modes resumes cleanly.
+the highest fully-completed `vehicle.id`. Each UI button gets its own key so
+serial and parallel runs of the "same" mode track progress independently
+(starting Details Full ⚡ won't disturb the Details Full serial checkpoint).
 """
 from pathlib import Path
 from typing import Optional
@@ -18,13 +24,19 @@ from typing import Optional
 
 CHECKPOINT_FILE = Path(__file__).parent.parent.parent / "scraper_checkpoint.txt"
 
-# Stable on-disk order — keeps diffs of the file readable.
+# Stable on-disk order — keeps diffs of the file readable. One key per UI
+# button: serial keys first, then their parallel (⚡) counterparts.
 _CHECKPOINT_KEYS = (
     "listing_full",
     "listing_make",
+    "listing_full_parallel",
+    "listing_make_parallel",
     "details_full",
     "details_full_make",
     "details_update",
+    "details_full_parallel",
+    "details_full_make_parallel",
+    "details_update_parallel",
 )
 
 

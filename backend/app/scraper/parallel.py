@@ -217,7 +217,7 @@ def run_details_parallel(
     Returns counters dict: {processed, delisted, load_failed, total}.
     """
     if mode == "update":
-        ckpt_key = "details_update"
+        ckpt_key = "details_update_parallel"
         sql = (
             "SELECT id, url FROM vehicles "
             "WHERE needs_detail_refresh = TRUE ORDER BY id ASC"
@@ -225,14 +225,14 @@ def run_details_parallel(
         params: tuple = ()
     elif mode == "full":
         if target_make:
-            ckpt_key = "details_full_make"
+            ckpt_key = "details_full_make_parallel"
             sql = (
                 "SELECT id, url FROM vehicles "
                 "WHERE LOWER(make) = LOWER(%s) ORDER BY id ASC"
             )
             params = (target_make,)
         else:
-            ckpt_key = "details_full"
+            ckpt_key = "details_full_parallel"
             sql = "SELECT id, url FROM vehicles ORDER BY id ASC"
             params = ()
     else:
@@ -559,7 +559,7 @@ def run_listing_parallel(
 
     Returns counters dict: {found, new, updated, deactivated}.
     """
-    ckpt_key = "listing_make" if target_make else "listing_full"
+    ckpt_key = "listing_make_parallel" if target_make else "listing_full_parallel"
 
     # Phase 0: discover makes via a temporary single browser (cheap).
     discovery = WorkerBrowser(worker_id=999).start()
