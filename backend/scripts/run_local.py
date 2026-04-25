@@ -188,6 +188,7 @@ def _run_listing(
 
     try:
         page = browser.get_page()
+        BrowserManager.block_media(page)
 
         # ── Phase 1: listing scan ────────────────────────────────────────────
         all_makes = get_all_makes(page)
@@ -414,6 +415,7 @@ def _run_details(
 
         log.info(f"Details pass ({mode}): {len(rows)} row(s) for {scope_label}")
         detail_page = browser.new_page()
+        BrowserManager.block_media(detail_page)
 
         processed = delisted = load_failed = 0
 

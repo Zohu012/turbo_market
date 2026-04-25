@@ -94,6 +94,25 @@ class BrowserManager:
             pass
         return page
 
+    @staticmethod
+    def block_media(page: Page) -> None:
+        """Abort image / media / font requests on this page.
+
+        Cuts listing-page load time significantly (turbo.az listing cards
+        are HTML/text heavy; images are loaded lazily and never needed by
+        the scraper since we only read src= attributes, not the files).
+        Safe for Cloudflare — the challenge uses JS, not image captchas.
+        Only applied per-page so it doesn't affect the user's live Chrome
+        session in CDP mode.
+        """
+        def _abort_media(route):
+            if route.request.resource_type in ("image", "media", "font"):
+                route.abort()
+            else:
+                route.continue_()
+
+        page.route("**/*", _abort_media)
+
     def close_page(self, page: Page):
         try:
             if page != self._page:
