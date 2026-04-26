@@ -427,6 +427,13 @@ def run_details_parallel(
                 log.warning(
                     f"  delisted handling failed for vehicle {vehicle_id}: {e}"
                 )
+                # Mark failed so the in-chunk retry / next-run retry covers it
+                # — otherwise the row is silently dropped (no DB change, no log
+                # in failed-ids file).
+                with counters_lock:
+                    counters["load_failed"] += 1
+                with failed_lock:
+                    failed_in_chunk.append(vehicle_id)
                 return
             try:
                 update_vehicle_detail(
@@ -437,6 +444,8 @@ def run_details_parallel(
                 log.warning(
                     f"  delisted spec backfill failed for vehicle {vehicle_id}: {e}"
                 )
+                # Don't mark failed — mark_delisted already succeeded above,
+                # so the row IS processed (delisted). Spec backfill is best-effort.
         else:
             try:
                 update_vehicle_detail(
@@ -451,6 +460,12 @@ def run_details_parallel(
                 log.warning(
                     f"  update_vehicle_detail failed for vehicle {vehicle_id}: {e}"
                 )
+                # Mark failed so the row gets retried — without this the row is
+                # silently lost (DB stays empty, nothing in failed-ids file).
+                with counters_lock:
+                    counters["load_failed"] += 1
+                with failed_lock:
+                    failed_in_chunk.append(vehicle_id)
                 return
 
         if mode == "update":
@@ -482,15 +497,58 @@ def run_details_parallel(
                     except Exception as e:
                         log.warning(f"  worker future raised: {e}")
 
+                # ── In-chunk retry pass ─────────────────────────────────
+                # Snapshot this chunk's failed ids, clear the bucket, and
+                # re-submit them through the executor once more. Catches
+                # transient CF blocks / Page.goto timeouts / worker context
+                # hiccups within the SAME run instead of waiting for the
+                # cross-run retry queue. Whatever still fails after this
+                # pass is the genuinely-stuck set that gets persisted.
+                # Counter bookkeeping: subtract the failed counts that the
+                # first attempt added, so retries that succeed don't double
+                # the total. Re-counts happen inside _process_row.
+                with failed_lock:
+                    retry_batch = list(failed_in_chunk)
+                    failed_in_chunk.clear()
+
+                if retry_batch and not stop_event.is_set():
+                    # Roll back the load_failed counter — _process_row will
+                    # re-increment for any row that still fails on retry.
+                    with counters_lock:
+                        counters["load_failed"] -= len(retry_batch)
+                    chunk_urls = {vid: url for vid, url in chunk}
+                    retry_pairs = [
+                        (vid, chunk_urls[vid])
+                        for vid in retry_batch
+                        if vid in chunk_urls
+                    ]
+                    log.info(
+                        f"  In-chunk retry: re-attempting "
+                        f"{len(retry_pairs)} failed row(s)"
+                    )
+                    retry_futures = [
+                        executor.submit(_process_row, vid, url)
+                        for vid, url in retry_pairs
+                    ]
+                    for f in concurrent.futures.as_completed(retry_futures):
+                        try:
+                            f.result()
+                        except Exception as e:
+                            log.warning(f"  retry future raised: {e}")
+
                 # Advance checkpoint to highest id in the completed chunk.
                 # Even rows that load_failed are tracked in the failed-ids
                 # file and will be retried on the next run.
                 max_id = max(vid for vid, _ in chunk)
                 save_details_progress(ckpt_key, max_id)
 
-                # Flush this chunk's failures to disk for next-run retry.
+                # Flush the post-retry residual to disk for next-run retry.
                 with failed_lock:
                     if failed_in_chunk:
+                        log.info(
+                            f"  In-chunk retry: {len(failed_in_chunk)} "
+                            f"still failing, queued for next run"
+                        )
                         append_failed_ids(ckpt_key, failed_in_chunk)
                         failed_in_chunk.clear()
 
@@ -501,6 +559,23 @@ def run_details_parallel(
                     f"delisted={counters['delisted']} "
                     f"load_failed={counters['load_failed']})"
                 )
+
+                # First-chunk health check: surface partial worker-init
+                # failures (e.g. 6/8 workers OK, 2 silently failed). Without
+                # this, a fraction of rows would be silently load_failed for
+                # the entire run, polluting the cross-run retry queue.
+                if chunk_start == 0:
+                    started = worker_id_counter["n"]
+                    succeeded = init_success_count["n"]
+                    if started and succeeded < started:
+                        log.error(
+                            f"  WARNING: only {succeeded}/{started} workers "
+                            f"initialized successfully. Failed workers will "
+                            f"silently mark every row they touch as "
+                            f"load_failed. Check 'browser init FAILED' / "
+                            f"'DB connection FAILED' logs above for the "
+                            f"root cause."
+                        )
 
                 # Bail out early if the first chunk shows ALL rows failing.
                 # Every load = ~100ms minimum; if 100 rows all "fail" in
