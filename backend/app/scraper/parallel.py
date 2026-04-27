@@ -471,14 +471,17 @@ def run_details_parallel(
                     failed_in_chunk.append(vehicle_id)
                 return
 
-        if mode == "update":
-            try:
-                clear_needs_detail_refresh(conn, vehicle_id)
-            except Exception as e:
-                log.warning(
-                    f"  clear_needs_detail_refresh failed for vehicle "
-                    f"{vehicle_id}: {e}"
-                )
+        # Clear the dirty flag on any successful detail write. Both Full and
+        # Update modes just fetched fresh detail data — the flag is stale
+        # either way. Skipping this in Full mode meant a Full run still left
+        # 50K+ rows flagged TRUE, forcing an unnecessary Update run after.
+        try:
+            clear_needs_detail_refresh(conn, vehicle_id)
+        except Exception as e:
+            log.warning(
+                f"  clear_needs_detail_refresh failed for vehicle "
+                f"{vehicle_id}: {e}"
+            )
 
     # ── Chunked execution ──
     try:
