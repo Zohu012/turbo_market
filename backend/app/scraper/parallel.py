@@ -52,6 +52,9 @@ from app.scraper.checkpoint import (
     load_failed_ids,
     append_failed_ids,
     clear_failed_ids,
+    read_make_progress,
+    update_make_progress,
+    clear_make_progress,
 )
 from app.scraper.classifier import select_delist_suspects
 from app.scraper.lifecycle import increment_misses_for_ids, run_safety_deactivate
@@ -651,24 +654,33 @@ def run_listing_parallel(
     else:
         makes = all_makes
 
-    # Resume: drop already-done makes (those before the saved make in the
-    # original order). We don't try to resume mid-make in parallel mode —
-    # the make is re-scraped from page 1.
-    last_make, _ = load_listing_progress(ckpt_key)
-    if last_make:
-        idx = next(
-            (i for i, m in enumerate(makes) if m["name"] == last_make), -1
-        )
-        if idx >= 0:
-            skipped = idx + 1
-            makes = makes[idx + 1:]
-            log.info(
-                f"Resuming after completed make '{last_make}' — "
-                f"skipping {skipped}, {len(makes)} remaining"
-            )
+    # Resume from per-make sidecar: skip done makes, resume in-flight makes
+    # from their saved page, start fresh on absent makes. Source of truth is
+    # `scraper_progress_<key>.txt` (per-make), not the single-key checkpoint
+    # — the latter is last-writer-wins across 8 workers and only kept as a
+    # human-visible "last completed make" hint.
+    progress = read_make_progress(ckpt_key)
 
-    if not makes:
+    def _start_page_for(m: dict) -> Optional[int]:
+        st, np = progress.get(m["name"], ("absent", 1))
+        return None if st == "done" else np
+
+    queued: list[tuple[dict, int]] = [
+        (m, sp) for m in makes if (sp := _start_page_for(m)) is not None
+    ]
+    done_n = sum(1 for m in makes if progress.get(m["name"], ("",))[0] == "done")
+    inflight_n = sum(1 for _, sp in queued if sp > 1)
+    fresh_n = len(queued) - inflight_n
+    if progress:
+        log.info(
+            f"Resume: done={done_n}, in_flight={inflight_n}, fresh={fresh_n}"
+        )
+
+    if not queued:
         log.info("Listing parallel: nothing to do")
+        # All makes already done — clean up the sidecar so the next run starts
+        # from a blank slate.
+        clear_make_progress(ckpt_key)
         return {"found": 0, "new": 0, "updated": 0, "deactivated": 0}
 
     # Session bookkeeping (single row, like the serial path).
@@ -681,7 +693,7 @@ def run_listing_parallel(
     )
     log.info(
         f"Session {session_id} started at {session_start.isoformat()} "
-        f"(parallel, workers={worker_count}, makes={len(makes)})"
+        f"(parallel, workers={worker_count}, makes={len(queued)})"
     )
 
     counters = {"found": 0, "new": 0, "updated": 0, "deactivated": 0}
@@ -693,6 +705,7 @@ def run_listing_parallel(
     worker_browsers: list[WorkerBrowser] = []
     worker_conns: list = []
     workers_lock = threading.Lock()
+    progress_lock = threading.Lock()
 
     def _init_worker():
         with worker_id_lock:
@@ -713,7 +726,7 @@ def run_listing_parallel(
         thread_local.browser = browser
         thread_local.conn = conn
 
-    def _process_make(make: dict):
+    def _process_make(make: dict, start_page: int):
         browser = thread_local.browser
         conn = thread_local.conn
         if browser is None:
@@ -735,15 +748,30 @@ def run_listing_parallel(
                 elif action == "updated":
                     local_counters["updated"] += 1
             committed_n += len(vehicles_on_page)
+            # Durable per-page resume point. If the worker dies right after
+            # this returns, the next run picks up at page_num+1 (upserts are
+            # idempotent on turbo_id, so re-fetching the page on resume is
+            # safe).
+            update_make_progress(
+                ckpt_key, make["name"], "in_flight", page_num + 1, progress_lock
+            )
 
         try:
             vehicles = scrape_make_pages(
-                page, make, start_page=1, on_page_complete=_commit_page
+                page, make, start_page=start_page, on_page_complete=_commit_page
             )
             log.info(
                 f"  {make['name']}: {len(vehicles)} found, "
                 f"{committed_n} committed"
             )
+            # Success path only — mark done in the sidecar AND drop a
+            # human-visible breadcrumb in scraper_checkpoint.txt. On the
+            # exception path below we deliberately do nothing so the last
+            # in_flight:N from _commit_page survives for resume.
+            update_make_progress(
+                ckpt_key, make["name"], "done", 0, progress_lock
+            )
+            save_listing_progress(ckpt_key, make["name"])
         except Exception as e:
             log.error(f"  {make['name']} failed: {e}")
         finally:
@@ -751,9 +779,6 @@ def run_listing_parallel(
                 counters["found"] += local_counters["found"]
                 counters["new"] += local_counters["new"]
                 counters["updated"] += local_counters["updated"]
-            # Mark this make completed in the checkpoint so a crash mid-run
-            # lets the next run skip already-done makes.
-            save_listing_progress(ckpt_key, make["name"])
 
     session_status = "running"
     session_error: Optional[str] = None
@@ -773,10 +798,10 @@ def run_listing_parallel(
             max_workers=worker_count, initializer=_init_worker
         ) as executor:
             futures = []
-            for make in makes:
+            for make, start_page in queued:
                 if stop_event.is_set():
                     break
-                futures.append(executor.submit(_process_make, make))
+                futures.append(executor.submit(_process_make, make, start_page))
             for f in concurrent.futures.as_completed(futures):
                 try:
                     f.result()
@@ -784,7 +809,10 @@ def run_listing_parallel(
                     log.warning(f"  make future raised: {e}")
 
         if not stop_event.is_set():
+            # Full success — wipe both the human breadcrumb and the per-make
+            # sidecar so the next run starts from a blank slate.
             clear_checkpoint(ckpt_key)
+            clear_make_progress(ckpt_key)
 
         update_session(
             main_conn,

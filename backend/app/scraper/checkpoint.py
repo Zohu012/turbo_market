@@ -17,7 +17,16 @@ Each line is `key:value`. Listing keys store `make[:page]`; details keys store
 the highest fully-completed `vehicle.id`. Each UI button gets its own key so
 serial and parallel runs of the "same" mode track progress independently
 (starting Details Full ⚡ won't disturb the Details Full serial checkpoint).
+
+Listing parallel runs additionally write a sidecar at
+`backend/scraper_progress_<key>.txt` recording per-make status across all 8
+workers — see `make_progress_path` and friends below. The single-key
+breadcrumb in `scraper_checkpoint.txt` is last-writer-wins across workers, so
+it is no longer the source of truth for resume; it stays as a human-visible
+"last completed make" hint.
 """
+import os
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -73,6 +82,14 @@ def clear_checkpoint(key: str) -> None:
     data = read_checkpoint()
     data.pop(key, None)
     write_checkpoint(data)
+    # Wipe the per-make sidecar too if this key has one (no-op for serial
+    # keys that never wrote one). Keeps the UI "Clear" button single-action.
+    p = CHECKPOINT_FILE.parent / f"scraper_progress_{key}.txt"
+    if p.exists():
+        p.unlink()
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    if tmp.exists():
+        tmp.unlink()
 
 
 def load_listing_progress(key: str) -> tuple[Optional[str], int]:
@@ -137,3 +154,115 @@ def clear_failed_ids(mode_key: str) -> None:
     p = failed_ids_path(mode_key)
     if p.exists():
         p.unlink()
+
+
+# ── Per-make progress sidecar (parallel listing runs) ─────────────────────
+#
+# When 8 workers run in parallel, the single-key checkpoint is last-writer-
+# wins — 7 in-flight makes leave no trace if all workers crash together
+# (e.g. Cloudflare blocks every tab). The sidecar below records each make's
+# state independently so the next run can skip done makes, resume in-flight
+# makes from the right page, and start fresh on makes that never ran.
+#
+# Format: one `name:status[:next_page]` line per make.
+#   Audi:in_flight:13     ← pages 1..12 fully committed, resume from page 13
+#   BMW:done              ← finished cleanly
+#   (absent)              ← never started, run from page 1
+
+
+def make_progress_path(mode_key: str) -> Path:
+    return CHECKPOINT_FILE.parent / f"scraper_progress_{mode_key}.txt"
+
+
+def read_make_progress(mode_key: str) -> dict[str, tuple[str, int]]:
+    """Parse sidecar into `{make_name: (status, next_page)}`.
+
+    `status` is `"done"` or `"in_flight"`. `next_page` is the page to resume
+    from (1 for done — unused). Malformed lines are skipped silently.
+    """
+    p = make_progress_path(mode_key)
+    if not p.exists():
+        return {}
+    out: dict[str, tuple[str, int]] = {}
+    for raw in p.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or ":" not in line:
+            continue
+        parts = line.split(":")
+        # Make names can contain colons (e.g. "GWM (Great Wall Motor)" — none
+        # currently, but be defensive). Status is always one of two literals
+        # at a known index from the right.
+        if len(parts) >= 3 and parts[-2] == "in_flight" and parts[-1].isdigit():
+            name = ":".join(parts[:-2])
+            out[name] = ("in_flight", int(parts[-1]))
+        elif len(parts) >= 2 and parts[-1] == "done":
+            name = ":".join(parts[:-1])
+            out[name] = ("done", 1)
+    return out
+
+
+def write_make_progress(
+    mode_key: str,
+    data: dict[str, tuple[str, int]],
+    lock: threading.Lock,
+) -> None:
+    """Atomic whole-file write under caller-supplied lock.
+
+    Serializes `data` to a temp file then `os.replace`s it onto the target —
+    atomic on both POSIX and Win32, so a torn write leaves the old file
+    intact rather than producing a half-written progress file.
+    """
+    p = make_progress_path(mode_key)
+    lines = []
+    for name, (status, next_page) in sorted(data.items()):
+        if status == "done":
+            lines.append(f"{name}:done")
+        elif status == "in_flight":
+            lines.append(f"{name}:in_flight:{next_page}")
+    payload = "\n".join(lines)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    with lock:
+        if not lines:
+            if p.exists():
+                p.unlink()
+            if tmp.exists():
+                tmp.unlink()
+            return
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, p)
+
+
+def update_make_progress(
+    mode_key: str,
+    make_name: str,
+    status: str,
+    next_page: int,
+    lock: threading.Lock,
+) -> None:
+    """Read → mutate one entry → write, all under `lock`.
+
+    Called by each worker once per page commit and once per make completion.
+    """
+    with lock:
+        data = read_make_progress(mode_key)
+        data[make_name] = (status, next_page)
+        # Inline the write to avoid re-acquiring the lock.
+        p = make_progress_path(mode_key)
+        lines = []
+        for name, (st, np) in sorted(data.items()):
+            if st == "done":
+                lines.append(f"{name}:done")
+            elif st == "in_flight":
+                lines.append(f"{name}:in_flight:{np}")
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text("\n".join(lines), encoding="utf-8")
+        os.replace(tmp, p)
+
+
+def clear_make_progress(mode_key: str) -> None:
+    p = make_progress_path(mode_key)
+    if p.exists():
+        p.unlink()
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    if tmp.exists():
+        tmp.unlink()
