@@ -181,6 +181,7 @@ def _run_listing(
 
         log.info(f"Listing pass: scanning {len(makes)} make(s)")
 
+        scanned_make_names: list[str] = []
         for make in makes:
             log.info(f"[make] {make['name']}")
             committed = {"n": 0}
@@ -210,6 +211,10 @@ def _run_listing(
                     f"  {make['name']}: {len(vehicles)} found, "
                     f"{committed['n']} committed"
                 )
+                # Mark this make fully scanned ONLY on clean exit. The except
+                # branch below skips this list, so a CF-blocked make won't
+                # poison Phase 2's scanned-makes scope.
+                scanned_make_names.append(make["name"])
             except Exception as e:
                 log.error(
                     f"  {make['name']} failed after page {current_page['num']}, "
@@ -236,7 +241,12 @@ def _run_listing(
         # Side effect: every suspect gets needs_detail_refresh=TRUE so the
         # next Details Update will fetch its detail page and either confirm
         # delisted (mark_delisted) or simply refresh data.
-        suspects = select_delist_suspects(conn, session_start, target_make)
+        # Pass scanned_make_names so a CF-blocked partial run doesn't flag
+        # un-scanned makes (the cause of the 5K Mercedes false-deactivation).
+        log.info(f"Phase 2 scope: {len(scanned_make_names)} fully-scanned make(s)")
+        suspects = select_delist_suspects(
+            conn, session_start, target_make, scanned_makes=scanned_make_names,
+        )
         log.info(
             f"Phase 2: {len(suspects)} delist-suspect(s) flagged for detail refresh"
         )

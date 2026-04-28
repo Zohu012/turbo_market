@@ -24,6 +24,43 @@ def get_sync_conn() -> PGConnection:
     return psycopg2.connect(dsn)
 
 
+# ── Vehicle lifecycle helpers ───────────────────────────────────────────────────
+
+def _build_reactivation_fields(
+    cur,
+    vehicle_id: int,
+    now: datetime,
+    last_activated_at,
+    date_added,
+    active_days_accumulated: Optional[int],
+) -> dict:
+    """Compute the field overrides for an inactive → active flip.
+
+    Reads `date_deactivated` to compute the length of the previous active
+    window, accumulates it into `active_days_accumulated`, and resets the
+    anchor. Both the listing path (upsert_listing) and the details path
+    (update_vehicle_detail) call this so reactivation math stays consistent.
+    """
+    cur.execute(
+        "SELECT date_deactivated FROM vehicles WHERE id = %s", (vehicle_id,)
+    )
+    dd_row = cur.fetchone()
+    date_deactivated = dd_row["date_deactivated"] if dd_row else None
+
+    anchor = last_activated_at or date_added
+    prev_window = 0
+    if anchor and date_deactivated and date_deactivated > anchor:
+        prev_window = (date_deactivated - anchor).days
+    return {
+        "active_days_accumulated": (active_days_accumulated or 0) + prev_window,
+        "last_activated_at": now,
+        "date_deactivated": None,
+        "days_to_sell": None,
+        "status": "active",
+        "missing_scan_count": 0,
+    }
+
+
 # ── Vehicle upsert ──────────────────────────────────────────────────────────────
 
 def upsert_listing(
@@ -143,29 +180,19 @@ def upsert_listing(
             )
 
         # Reactivation: inactive → active. Accumulate the previous active
-        # window into active_days_accumulated and reset the anchor.
+        # window into active_days_accumulated and reset the anchor. Helper
+        # is shared with update_vehicle_detail's reactivation path.
         extra: dict = {}
         reactivated = row["status"] == "inactive"
         if reactivated:
-            anchor = row["last_activated_at"] or row["date_added"]
-            # Use row's date_deactivated via subquery? We already lost it if
-            # we don't re-read — grab it now from the row.
-            cur.execute(
-                "SELECT date_deactivated FROM vehicles WHERE id = %s", (vehicle_id,)
+            extra = _build_reactivation_fields(
+                cur,
+                vehicle_id,
+                now,
+                row["last_activated_at"],
+                row["date_added"],
+                row["active_days_accumulated"],
             )
-            dd_row = cur.fetchone()
-            date_deactivated = dd_row["date_deactivated"] if dd_row else None
-
-            prev_window = 0
-            if anchor and date_deactivated and date_deactivated > anchor:
-                prev_window = (date_deactivated - anchor).days
-            extra["active_days_accumulated"] = (
-                (row["active_days_accumulated"] or 0) + prev_window
-            )
-            extra["last_activated_at"] = now
-            extra["date_deactivated"] = None
-            extra["days_to_sell"] = None
-            extra["status"] = "active"
             needs_detail = True  # Always re-fetch detail on reactivation.
 
         update_fields = {
@@ -231,16 +258,28 @@ def update_vehicle_detail(
     now = datetime.now(timezone.utc)
 
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        # ── Read current lifecycle state in one roundtrip ────────────────
+        # We fetch view-count fields + reactivation fields together so the
+        # details-path reactivation logic below can run without a second
+        # SELECT. Reactivation fires when a previously-inactive row turns
+        # out to have a healthy detail page (seller block present, no
+        # delisted marker) — guards against the false-positive deactivations
+        # that the listing-path two-miss safety net produces during
+        # CF-blocked partial runs.
+        cur.execute(
+            "SELECT view_count_base, last_scraped_view_count, "
+            "       status, last_activated_at, active_days_accumulated, "
+            "       date_added "
+            "FROM vehicles WHERE id = %s",
+            (vehicle_id,),
+        )
+        lifecycle_row = cur.fetchone() or {}
+
         # ── View count bookkeeping (cumulative on repost) ────────────────
         scraped_vc = detail.get("view_count_scraped")
         effective_vc: Optional[int] = None
         if scraped_vc is not None:
-            cur.execute(
-                "SELECT view_count_base, last_scraped_view_count "
-                "FROM vehicles WHERE id = %s",
-                (vehicle_id,),
-            )
-            row = cur.fetchone() or {}
+            row = lifecycle_row
             base = row.get("view_count_base") or 0
             last_scraped = row.get("last_scraped_view_count")
 
@@ -318,14 +357,50 @@ def update_vehicle_detail(
                 (now, seller_id),
             )
 
-        set_clause = ", ".join(
-            f"{k} = %({k})s" for k in fields if fields[k] is not None
-        )
+        # ── Reactivation (details-path) ──────────────────────────────────
+        # If the row was previously deactivated but the detail page proves
+        # it's alive (seller block rendered + parsed AND no delisted marker),
+        # flip it back to active. Mirrors upsert_listing's reactivation but
+        # triggered by a healthy detail fetch instead of a listing sighting.
+        # This is what heals false-positive deactivations from CF-blocked
+        # listing runs without forcing the user to re-run --listing-make.
+        if (
+            lifecycle_row.get("status") == "inactive"
+            and seller_id is not None
+            and not detail.get("delisted")
+        ):
+            reactivation = _build_reactivation_fields(
+                cur,
+                vehicle_id,
+                now,
+                lifecycle_row.get("last_activated_at"),
+                lifecycle_row.get("date_added"),
+                lifecycle_row.get("active_days_accumulated"),
+            )
+            fields.update(reactivation)
+            # Stamp last_seen_at so the next listing pass doesn't immediately
+            # re-flag this row as a delist suspect on `last_seen_at < session_start`.
+            fields["last_seen_at"] = now
+            log.info(
+                f"  Reactivated vehicle {vehicle_id} via details path "
+                f"(was inactive, detail page healthy)"
+            )
+
+        # Keep explicit None values for known-nullable lifecycle columns so
+        # the reactivation block above can clear date_deactivated and
+        # days_to_sell. All other Nones are filtered (we don't want to wipe
+        # color/vin/etc. just because the detail scrape didn't return them).
+        _NULLABLE_LIFECYCLE = {"date_deactivated", "days_to_sell"}
+        writeable = {
+            k: v
+            for k, v in fields.items()
+            if v is not None or k in _NULLABLE_LIFECYCLE
+        }
+        set_clause = ", ".join(f"{k} = %({k})s" for k in writeable)
         if set_clause:
             cur.execute(
                 f"UPDATE vehicles SET {set_clause} WHERE id = %(vehicle_id)s",
-                {k: v for k, v in fields.items() if v is not None}
-                | {"vehicle_id": vehicle_id},
+                {**writeable, "vehicle_id": vehicle_id},
             )
 
         # ── Images ───────────────────────────────────────────────────────

@@ -129,7 +129,15 @@ def parse_regdate(raw: Optional[str]) -> Optional[date]:
 
 
 def _detect_delisted(page: Page) -> bool:
-    """Three overlapping delisted markers — any one is sufficient."""
+    """Strong delisted markers — either alone is sufficient.
+
+    The previous "absent sidebar = delisted" rule was dropped: a render
+    hiccup, ad-blocker artifact, or partial CF challenge can erase
+    `.product-sidebar__box` on a perfectly healthy page, which then caused
+    mass false-deactivations via mark_delisted in the details runner.
+    A truly-delisted listing on turbo.az always carries either the expired
+    banner or the overlay text — those are reliable.
+    """
     try:
         if page.query_selector(".status-message--expired"):
             return True
@@ -141,11 +149,6 @@ def _detect_delisted(page: Page) -> bool:
             text = (overlay.inner_text() or "").strip().lower()
             if "satışdan çıxarılıb" in text:
                 return True
-    except Exception:
-        pass
-    try:
-        if not page.query_selector(".product-sidebar__box"):
-            return True
     except Exception:
         pass
     return False

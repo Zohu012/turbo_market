@@ -20,7 +20,7 @@ classification — partial scans must not flag out-of-scope vehicles.
 """
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Sequence
 
 import psycopg2.extras
 from psycopg2.extensions import connection as PGConnection
@@ -32,6 +32,7 @@ def select_delist_suspects(
     conn: PGConnection,
     session_start: datetime,
     target_make: Optional[str] = None,
+    scanned_makes: Optional[Sequence[str]] = None,
 ) -> list[tuple[int, str]]:
     """Active vehicles whose last_seen_at is older than this session's start.
 
@@ -43,9 +44,21 @@ def select_delist_suspects(
 
     Returns: [(vehicle_id, url), ...] ordered by id for deterministic runs.
 
-    Scope-safe: if target_make is provided, restricts the query to that make
-    so out-of-scope rows don't get flagged during make-scope listing runs.
+    Scope guards (apply in priority order, first match wins):
+      * `target_make` set → restrict to that make only. Make-scope runs always
+        know exactly what was scanned.
+      * `scanned_makes` set → restrict to those makes (case-insensitive).
+        Used by --listing-full runs to avoid false-deactivating un-scanned
+        makes when the run was CF-blocked partway through. Empty list →
+        return [] immediately (degenerate run, nothing was scanned cleanly).
+      * Neither set → operate globally (legacy Celery flow). Emit a warning
+        so future regressions are visible — every modern caller should pass
+        a scope hint.
     """
+    if scanned_makes is not None and not target_make and len(scanned_makes) == 0:
+        log.info("select_delist_suspects: scanned_makes is empty — skipping")
+        return []
+
     sql = (
         "UPDATE vehicles "
         "   SET needs_detail_refresh = TRUE "
@@ -55,6 +68,15 @@ def select_delist_suspects(
     if target_make:
         sql += " AND LOWER(make) = LOWER(%s)"
         params.append(target_make)
+    elif scanned_makes is not None:
+        sql += " AND LOWER(make) = ANY(%s)"
+        params.append([m.lower() for m in scanned_makes])
+    else:
+        log.warning(
+            "select_delist_suspects called without scope guard — "
+            "operating globally. A partial listing run may now mass-flag "
+            "un-scanned makes as delist suspects."
+        )
     sql += " RETURNING id, url"
 
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:

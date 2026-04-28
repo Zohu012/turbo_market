@@ -811,6 +811,22 @@ def run_listing_parallel(
                 except Exception as e:
                     log.warning(f"  make future raised: {e}")
 
+        # Snapshot the set of fully-scanned makes BEFORE clearing the sidecar.
+        # Only `done` makes count — `in_flight:N` finished pages 1..N-1 but
+        # stopped before exhausting the index, so cards on later pages still
+        # have stale `last_seen_at` and would be falsely flagged. This guard
+        # is what stops mass false-deactivations after a CF-blocked run.
+        final_progress = read_make_progress(ckpt_key)
+        if final_progress:
+            scanned_makes = [
+                name for name, (st, _) in final_progress.items() if st == "done"
+            ]
+        else:
+            # Sidecar already wiped (full clean run with no prior progress
+            # state) — every queued make completed; treat them all as scanned.
+            scanned_makes = [m["name"] for m, _ in queued]
+        log.info(f"Phase 2 scope: {len(scanned_makes)} fully-scanned make(s)")
+
         if not stop_event.is_set():
             # Full success — wipe both the human breadcrumb and the per-make
             # sidecar so the next run starts from a blank slate.
@@ -826,7 +842,10 @@ def run_listing_parallel(
         )
 
         # Phase 2: classify delist-suspects (single-threaded — DB-only).
-        suspects = select_delist_suspects(main_conn, session_start, target_make)
+        # Pass scanned_makes so partial runs don't flag un-scanned makes.
+        suspects = select_delist_suspects(
+            main_conn, session_start, target_make, scanned_makes=scanned_makes,
+        )
         log.info(
             f"Phase 2: {len(suspects)} delist-suspect(s) flagged for detail refresh"
         )
