@@ -82,9 +82,11 @@ from app.scraper.pipeline import (
 )
 from app.scraper.session import create_session, finish_session, update_session
 from app.scraper.classifier import select_delist_suspects
-from app.scraper.lifecycle import (
-    increment_misses_for_ids,
-    run_safety_deactivate,
+from app.scraper.sweep import (
+    add_scanned_make,
+    complete_sweep,
+    get_or_create_sweep,
+    get_scanned_makes,
 )
 from app.scraper.checkpoint import (
     clear_checkpoint as _clear_checkpoint,
@@ -115,17 +117,28 @@ def _run_listing(
     ckpt_key = "listing_make" if target_make else "listing_full"
     conn = get_sync_conn()
 
+    job_type = "listing_make" if target_make else "listing_full"
+    # Sweep is opened/joined BEFORE we know the full make list — we patch
+    # makes_total below once we've discovered the queue.
+    sweep = get_or_create_sweep(
+        conn, job_type=job_type, target_make=target_make, makes_total=None,
+    )
     session_id, session_start = create_session(
         conn,
-        job_type="listing_make" if target_make else "listing_full",
+        job_type=job_type,
         triggered_by="local",
         target_make=target_make,
+        sweep_id=sweep.id,
     )
-    log.info(f"Session {session_id} started at {session_start.isoformat()}")
+    log.info(
+        f"Session {session_id} (sweep {sweep.id}) "
+        f"started at {session_start.isoformat()}"
+    )
 
     counters = {"found": 0, "new": 0, "updated": 0, "deactivated": 0}
     session_status = "running"
     session_error: Optional[str] = None
+    interrupted = False
 
     try:
         page = browser.get_page()
@@ -181,7 +194,22 @@ def _run_listing(
 
         log.info(f"Listing pass: scanning {len(makes)} make(s)")
 
-        scanned_make_names: list[str] = []
+        # Patch the sweep's makes_total so the completion gate has a target.
+        # For target_make: just 1. For listing_full: total queued from this
+        # session — already-done makes from earlier sessions are NOT included
+        # because we resumed past them.
+        if sweep.makes_total is None:
+            already_done = (
+                len(get_scanned_makes(conn, sweep.id)) if not target_make else 0
+            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE scrape_sweeps SET makes_total = %s WHERE id = %s",
+                    (already_done + len(makes), sweep.id),
+                )
+            conn.commit()
+            sweep.makes_total = already_done + len(makes)
+
         for make in makes:
             log.info(f"[make] {make['name']}")
             committed = {"n": 0}
@@ -192,7 +220,9 @@ def _run_listing(
                 # times out. upsert_listing handles the per-row flagging.
                 for v in vehicles_on_page:
                     _vid, action, _, _needs_detail = upsert_listing(
-                        conn, v, session_start=session_start
+                        conn, v,
+                        sweep_id=sweep.id,
+                        session_start=session_start,
                     )
                     counters["found"] += 1
                     if action == "new":
@@ -211,21 +241,20 @@ def _run_listing(
                     f"  {make['name']}: {len(vehicles)} found, "
                     f"{committed['n']} committed"
                 )
-                # Mark this make fully scanned ONLY on clean exit. The except
-                # branch below skips this list, so a CF-blocked make won't
-                # poison Phase 2's scanned-makes scope.
-                scanned_make_names.append(make["name"])
+                # Persist this make as scanned in the sweep row (set semantics,
+                # lowercase). Carries across sessions so a CF-blocked run can
+                # resume and a later session still knows what was scanned.
+                add_scanned_make(conn, sweep.id, make["name"])
             except Exception as e:
                 log.error(
                     f"  {make['name']} failed after page {current_page['num']}, "
                     f"committed {committed['n']} vehicles: {e}"
                 )
+                interrupted = True
                 continue
             finally:
                 _save_listing_progress(ckpt_key, make["name"])
                 resume_from_page = 1
-
-        _clear_checkpoint(ckpt_key)
 
         # Persist counters mid-session so a crash between here and
         # finish_session() still leaves something in scrape_jobs.
@@ -237,40 +266,42 @@ def _run_listing(
             listings_updated=counters["updated"],
         )
 
-        # ── Phase 2: classify delist-suspects ────────────────────────────────
-        # Side effect: every suspect gets needs_detail_refresh=TRUE so the
-        # next Details Update will fetch its detail page and either confirm
-        # delisted (mark_delisted) or simply refresh data.
-        # Pass scanned_make_names so a CF-blocked partial run doesn't flag
-        # un-scanned makes (the cause of the 5K Mercedes false-deactivation).
-        log.info(f"Phase 2 scope: {len(scanned_make_names)} fully-scanned make(s)")
-        suspects = select_delist_suspects(
-            conn, session_start, target_make, scanned_makes=scanned_make_names,
-        )
-        log.info(
-            f"Phase 2: {len(suspects)} delist-suspect(s) flagged for detail refresh"
+        # ── Sweep-end gate ──────────────────────────────────────────────────
+        # Phase 2 only fires when the sweep is complete: every queued make
+        # for this scope has been scanned across one or more sessions, and
+        # the run was not user-stopped. Otherwise we leave the sweep
+        # `running` and the next session resumes it.
+        scanned_so_far = get_scanned_makes(conn, sweep.id)
+        sweep_done = (
+            not interrupted
+            and sweep.makes_total is not None
+            and len(scanned_so_far) >= sweep.makes_total
         )
 
-        # ── Phase 3: two-miss safety deactivate ──────────────────────────────
-        # Bump missing_scan_count for every suspect; bulk-deactivate at >= 2.
-        # A row that's truly delisted will be mark_delisted by Details Update
-        # (faster path), but two-miss is the safety net for cases where the
-        # detail page is unreachable or the user skips Details Update.
-        suspect_ids = [vid for vid, _ in suspects]
-        if suspect_ids:
-            bumped = increment_misses_for_ids(conn, suspect_ids)
+        if sweep_done:
             log.info(
-                f"Phase 3: bumped missing_scan_count for {bumped} suspect(s)"
+                f"Sweep {sweep.id} complete — running Phase 2 over "
+                f"{len(scanned_so_far)} make(s)"
             )
-        deactivated = run_safety_deactivate(conn)
-        counters["deactivated"] = deactivated
-        log.info(
-            f"Phase 3: deactivated {deactivated} vehicle(s) "
-            f"(>= 2 consecutive misses)"
-        )
-
-        session_status = "done"
-        log.info("=== Listing pass complete ===")
+            suspects = select_delist_suspects(
+                conn, sweep.id, scanned_makes=scanned_so_far,
+            )
+            log.info(
+                f"Phase 2: {len(suspects)} delist-suspect(s) flagged "
+                f"for detail refresh"
+            )
+            complete_sweep(conn, sweep.id, scanned_so_far)
+            _clear_checkpoint(ckpt_key)
+            session_status = "done"
+            log.info("=== Listing pass complete (sweep closed) ===")
+        else:
+            log.info(
+                f"Sweep {sweep.id} not complete "
+                f"(makes_done={len(scanned_so_far)} / "
+                f"makes_total={sweep.makes_total}) — Phase 2 deferred "
+                f"to next session"
+            )
+            session_status = "done"
 
     except Exception as e:
         session_status = "failed"

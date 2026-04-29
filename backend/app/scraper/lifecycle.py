@@ -1,21 +1,19 @@
 """
-Lifecycle helpers — two-miss sold detection + bulk deactivation.
+Lifecycle helpers — Celery-path two-miss sold detection + bulk deactivation.
 
-Two caller shapes use this module:
+The staged Listing → Details flow (run_local.py + parallel.py) no longer uses
+this module. It now relies on Sweep-based delist classification at sweep end
+(see app.scraper.sweep + app.scraper.classifier) plus detail-page confirmation
+via mark_delisted in pipeline.py — the detail page is the single authority on
+"alive on turbo.az."
 
-  (A) run_local.py (staged flow) — classifies delist-suspects up front via
-      last_seen_at, then confirms them in a unified Phase 3 detail loop. Phase 4
-      calls `increment_misses_for_ids(...)` for suspects that came back
-      not-delisted, then `run_safety_deactivate(...)` to bulk-flip any row at
-      >= 2 misses.
+These helpers are kept for the legacy Celery chord path
+(tasks.py::lifecycle_check_task) which still does "increment everything not
+in live_ids, then deactivate" because it doesn't carry a session_start /
+last_seen_sweep_id. Once Celery is retired, this whole module can go.
 
-  (B) tasks.py::lifecycle_check_task (Celery path) — receives a `live_ids` set
-      from the chord of per-make tasks; the classic "increment everything not
-      in live_ids, then deactivate" flow. Kept working by the legacy
-      `run_lifecycle_check_sync` wrapper below.
-
-Reset happens automatically in upsert_listing() whenever a card reappears
-(missing_scan_count = 0 in its update_fields).
+Reset of the legacy `missing_scan_count` still happens in upsert_listing()
+whenever a card reappears (the column has not yet been dropped).
 """
 import logging
 from collections import Counter

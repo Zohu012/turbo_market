@@ -57,8 +57,13 @@ from app.scraper.checkpoint import (
     clear_make_progress,
 )
 from app.scraper.classifier import select_delist_suspects
-from app.scraper.lifecycle import increment_misses_for_ids, run_safety_deactivate
 from app.scraper.session import create_session, finish_session, update_session
+from app.scraper.sweep import (
+    complete_sweep,
+    get_or_create_sweep,
+    is_sweep_complete,
+    update_sweep_progress,
+)
 
 log = logging.getLogger(__name__)
 
@@ -686,17 +691,28 @@ def run_listing_parallel(
         clear_make_progress(ckpt_key)
         return {"found": 0, "new": 0, "updated": 0, "deactivated": 0}
 
-    # Session bookkeeping (single row, like the serial path).
+    # Sweep + session bookkeeping. The Sweep is the logical "scan all queued
+    # makes once" pass — it survives across multiple sessions (CF block,
+    # Ctrl-C, connection drop). Phase 2 only fires when the sweep is complete.
     main_conn = get_sync_conn()
+    job_type = "listing_make" if target_make else "listing_full"
+    sweep = get_or_create_sweep(
+        main_conn,
+        job_type=job_type,
+        target_make=target_make,
+        makes_total=(done_n + len(queued)) if not target_make else len(queued),
+    )
     session_id, session_start = create_session(
         main_conn,
-        job_type="listing_make" if target_make else "listing_full",
+        job_type=job_type,
         triggered_by="parallel",
         target_make=target_make,
+        sweep_id=sweep.id,
     )
     log.info(
-        f"Session {session_id} started at {session_start.isoformat()} "
-        f"(parallel, workers={worker_count}, makes={len(queued)})"
+        f"Session {session_id} (sweep {sweep.id}) started at "
+        f"{session_start.isoformat()} (parallel, workers={worker_count}, "
+        f"makes={len(queued)})"
     )
 
     counters = {"found": 0, "new": 0, "updated": 0, "deactivated": 0}
@@ -743,7 +759,7 @@ def run_listing_parallel(
             nonlocal committed_n
             for v in vehicles_on_page:
                 _vid, action, _, _needs = upsert_listing(
-                    conn, v, session_start=session_start
+                    conn, v, sweep_id=sweep.id, session_start=session_start
                 )
                 local_counters["found"] += 1
                 if action == "new":
@@ -811,27 +827,23 @@ def run_listing_parallel(
                 except Exception as e:
                     log.warning(f"  make future raised: {e}")
 
-        # Snapshot the set of fully-scanned makes BEFORE clearing the sidecar.
-        # Only `done` makes count — `in_flight:N` finished pages 1..N-1 but
-        # stopped before exhausting the index, so cards on later pages still
-        # have stale `last_seen_at` and would be falsely flagged. This guard
-        # is what stops mass false-deactivations after a CF-blocked run.
+        # Sweep-end gate: Phase 2 only fires when every queued make has hit
+        # `done` AND the user did not stop the run. Otherwise the sweep stays
+        # `running` and the next session resumes it — preserving multi-session
+        # progress without false-flagging cards stamped earlier.
         final_progress = read_make_progress(ckpt_key)
-        if final_progress:
-            scanned_makes = [
-                name for name, (st, _) in final_progress.items() if st == "done"
-            ]
-        else:
-            # Sidecar already wiped (full clean run with no prior progress
-            # state) — every queued make completed; treat them all as scanned.
-            scanned_makes = [m["name"] for m, _ in queued]
-        log.info(f"Phase 2 scope: {len(scanned_makes)} fully-scanned make(s)")
+        # `done` makes from the entire sweep (carried over by the sidecar
+        # across sessions). Used both for sweep-completion check and as the
+        # Phase 2 scope guard.
+        scanned_makes = [
+            name for name, (st, _) in final_progress.items() if st == "done"
+        ]
+        update_sweep_progress(main_conn, sweep.id, len(scanned_makes))
 
-        if not stop_event.is_set():
-            # Full success — wipe both the human breadcrumb and the per-make
-            # sidecar so the next run starts from a blank slate.
-            clear_checkpoint(ckpt_key)
-            clear_make_progress(ckpt_key)
+        sweep_done = (
+            not stop_event.is_set()
+            and is_sweep_complete(final_progress, sweep.makes_total)
+        )
 
         update_session(
             main_conn,
@@ -841,26 +853,32 @@ def run_listing_parallel(
             listings_updated=counters["updated"],
         )
 
-        # Phase 2: classify delist-suspects (single-threaded — DB-only).
-        # Pass scanned_makes so partial runs don't flag un-scanned makes.
-        suspects = select_delist_suspects(
-            main_conn, session_start, target_make, scanned_makes=scanned_makes,
-        )
-        log.info(
-            f"Phase 2: {len(suspects)} delist-suspect(s) flagged for detail refresh"
-        )
-
-        # Phase 3: two-miss safety deactivate.
-        suspect_ids = [vid for vid, _ in suspects]
-        if suspect_ids:
-            bumped = increment_misses_for_ids(main_conn, suspect_ids)
-            log.info(f"Phase 3: bumped missing_scan_count for {bumped} suspect(s)")
-        deactivated = run_safety_deactivate(main_conn)
-        counters["deactivated"] = deactivated
-        log.info(f"Phase 3: deactivated {deactivated} vehicle(s) (>= 2 misses)")
-
-        session_status = "done"
-        log.info("=== Listing parallel pass complete ===")
+        if sweep_done:
+            log.info(
+                f"Sweep {sweep.id} complete — running Phase 2 over "
+                f"{len(scanned_makes)} make(s)"
+            )
+            suspects = select_delist_suspects(
+                main_conn, sweep.id, scanned_makes=scanned_makes,
+            )
+            log.info(
+                f"Phase 2: {len(suspects)} delist-suspect(s) flagged "
+                f"for detail refresh"
+            )
+            complete_sweep(main_conn, sweep.id, scanned_makes)
+            # Wipe sidecar + breadcrumb so the next run starts a fresh sweep.
+            clear_checkpoint(ckpt_key)
+            clear_make_progress(ckpt_key)
+            session_status = "done"
+            log.info("=== Listing parallel pass complete (sweep closed) ===")
+        else:
+            log.info(
+                f"Sweep {sweep.id} not complete "
+                f"(makes_done={len(scanned_makes)} / "
+                f"makes_total={sweep.makes_total}) — Phase 2 deferred "
+                f"to next session"
+            )
+            session_status = "done"
 
     except Exception as e:
         session_status = "failed"

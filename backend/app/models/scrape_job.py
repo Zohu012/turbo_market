@@ -1,7 +1,9 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, Index, Integer, String, Text, TIMESTAMP, func
+from sqlalchemy import (
+    BigInteger, ForeignKey, Index, Integer, String, Text, TIMESTAMP, func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -24,6 +26,9 @@ class ScrapeJob(Base):
     listings_updated: Mapped[int] = mapped_column(Integer, default=0)
     listings_deactivated: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[Optional[str]] = mapped_column(Text)
+    sweep_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("scrape_sweeps.id", ondelete="SET NULL")
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )

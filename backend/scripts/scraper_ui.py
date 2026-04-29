@@ -111,8 +111,7 @@ HTML = """<!DOCTYPE html>
       <h2>Controls</h2>
       <div class="row">
         <label style="color:#8b94a3;">All makes:</label>
-        <button id="btn-listing-full" title="Listing pages only — scrape every make. Flags new/updated/delist-suspect rows for Details Update. Two-miss safety deactivates rows absent twice in a row.">Listing Full</button>
-        <button id="btn-details-full" class="secondary" title="FIFO over every vehicle in DB (by vehicle.id). Live page → update detail; delisted page → mark_delisted; load failure → retry next run.">Details Full</button>
+        <button id="btn-listing-full" title="Listing pages only — scrape every make. Flags new / updated / reactivated rows for Details Update. At sweep end (all makes done across however many sessions), flags delist-suspects (active rows not seen in this sweep). Detail Update confirms via the detail page.">Listing Full</button>
         <button id="btn-details-update" class="secondary" title="FIFO over rows flagged needs_detail_refresh=TRUE. Clears the flag after each row. Run after Listing Full to drain the queue.">Details Update</button>
       </div>
       <div class="row">
@@ -201,7 +200,7 @@ async function refreshStatus() {
     $('stat-last').textContent = s.last_update ? new Date(s.last_update).toLocaleString() : '—';
     $('stat-pid').textContent = s.pid || '—';
 
-    ['btn-listing-full','btn-listing-make','btn-details-full','btn-details-update','btn-details-make',
+    ['btn-listing-full','btn-listing-make','btn-details-update','btn-details-make',
      'btn-listing-parallel','btn-details-full-parallel','btn-details-update-parallel'
     ].forEach(id => $(id).disabled = s.running);
     $('btn-stop').disabled = !s.running;
@@ -258,10 +257,6 @@ $('btn-listing-make').onclick = () => {
   const m = $('make-select').value;
   if (!m) { alert('Pick a make first'); return; }
   start({ mode: 'listing-make', make: m });
-};
-$('btn-details-full').onclick = () => {
-  if (!confirm('Details Full re-scrapes every vehicle in DB (FIFO by id). This can take a long time. Safe to stop and resume via the details_full checkpoint. Continue?')) return;
-  start({ mode: 'details-full' });
 };
 $('btn-details-update').onclick = () => start({ mode: 'details-update' });
 $('btn-details-make').onclick = () => {

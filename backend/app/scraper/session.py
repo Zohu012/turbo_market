@@ -30,11 +30,13 @@ def create_session(
     target_make: Optional[str] = None,
     target_model: Optional[str] = None,
     celery_task_id: Optional[str] = None,
+    sweep_id: Optional[int] = None,
 ) -> tuple[int, datetime]:
     """Insert a 'running' scrape_jobs row and return (id, started_at).
 
-    started_at is returned so callers can stamp it onto vehicles.last_seen_at
-    and pass it to the classifier — all three must agree on the same instant.
+    `sweep_id` links the session to its parent Sweep (see app.scraper.sweep).
+    A Sweep can span many Sessions; Phase 2 delist classification only fires
+    on the Session that closes the Sweep.
     """
     started_at = datetime.now(timezone.utc)
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -42,9 +44,9 @@ def create_session(
             """
             INSERT INTO scrape_jobs
               (job_type, status, triggered_by, target_make, target_model,
-               celery_task_id, started_at, created_at)
+               celery_task_id, started_at, created_at, sweep_id)
             VALUES
-              (%s, 'running', %s, %s, %s, %s, %s, %s)
+              (%s, 'running', %s, %s, %s, %s, %s, %s, %s)
             RETURNING id, started_at
             """,
             (
@@ -55,6 +57,7 @@ def create_session(
                 celery_task_id,
                 started_at,
                 started_at,
+                sweep_id,
             ),
         )
         row = cur.fetchone()

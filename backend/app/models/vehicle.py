@@ -70,11 +70,20 @@ class Vehicle(Base):
     # reset to 0 when it reappears. Deactivation only fires at >= 2.
     missing_scan_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
-    # Set to the current scrape session's started_at every time a listing card
-    # is observed. A delist-suspect is any active vehicle whose last_seen_at
-    # is older than the current session's start.
+    # Legacy — kept until V2 sweep is verified across two clean runs, then
+    # dropped. Was the per-session sighting stamp used by the old delist
+    # predicate. Replaced by `last_seen_sweep_id` which survives multi-session
+    # sweeps without the false-positive trap.
     last_seen_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    # Sighting stamp keyed to the current Sweep, not Session. A delist-suspect
+    # at sweep end is any active row in the scanned makes whose
+    # last_seen_sweep_id != current sweep id (or NULL). Set on every sighted
+    # card by upsert_listing.
+    last_seen_sweep_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("scrape_sweeps.id", ondelete="SET NULL")
     )
 
     # Queue flag for the decoupled Listing → Details Update split. Set TRUE
@@ -128,6 +137,7 @@ class Vehicle(Base):
         Index("idx_vehicles_date_added", "date_added"),
         Index("idx_vehicles_date_updated_turbo", "date_updated_turbo"),
         Index("idx_vehicles_last_seen_at", "last_seen_at"),
+        Index("ix_vehicles_last_seen_sweep", "last_seen_sweep_id"),
         Index("idx_vehicles_make_model_year_status", "make", "model", "year", "status"),
         Index(
             "idx_vehicles_needs_detail_refresh",

@@ -66,16 +66,21 @@ def _build_reactivation_fields(
 def upsert_listing(
     conn: PGConnection,
     vehicle: dict,
+    sweep_id: Optional[int] = None,
     session_start: Optional[datetime] = None,
 ) -> tuple[int, str, bool, bool]:
     """
     Insert or update a vehicle from listing card data.
 
-    `session_start` (optional): the started_at of the current scrape session.
-    When provided, `last_seen_at` is set to that value on both INSERT and UPDATE
-    paths so Phase 2 classification can identify rows absent from this session
-    via `last_seen_at < session_start`. Falls back to now() when omitted (keeps
-    callers that don't track sessions — e.g. Celery's scrape_make_task — working).
+    `sweep_id`: the id of the current Sweep (see app.scraper.sweep). Stamped
+    onto `last_seen_sweep_id` on every sighting so Phase 2 can identify rows
+    absent from the current sweep at sweep-end. Required for the staged
+    Listing → Details flow; `None` is only acceptable for callers that have
+    not been migrated yet (legacy Celery scrape_make_task).
+
+    `session_start`: legacy parameter, still written to `last_seen_at` for
+    observability. The classifier no longer reads this column — it reads
+    `last_seen_sweep_id` instead.
 
     Returns (vehicle_id, action, price_changed, needs_detail):
       action         = 'new' | 'updated' | 'unchanged'
@@ -110,13 +115,15 @@ def upsert_listing(
                   (turbo_id, make, model, year, price, currency, price_azn,
                    odometer, odometer_type, engine, url, status,
                    date_added, date_updated, date_updated_turbo,
-                   last_activated_at, last_seen_at, needs_detail_refresh)
+                   last_activated_at, last_seen_at, last_seen_sweep_id,
+                   needs_detail_refresh)
                 VALUES
                   (%(turbo_id)s, %(make)s, %(model)s, %(year)s, %(price)s,
                    %(currency)s, %(price_azn)s, %(odometer)s, %(odometer_type)s,
                    %(engine)s, %(url)s, 'active',
                    %(now)s, %(now)s, %(date_updated_turbo)s,
-                   %(now)s, %(last_seen_at)s, TRUE)
+                   %(now)s, %(last_seen_at)s, %(sweep_id)s,
+                   TRUE)
                 RETURNING id
                 """,
                 {
@@ -124,6 +131,7 @@ def upsert_listing(
                     "now": now,
                     "date_updated_turbo": listing_dt,
                     "last_seen_at": last_seen_stamp,
+                    "sweep_id": sweep_id,
                 },
             )
             vehicle_id = cur.fetchone()["id"]
@@ -202,12 +210,14 @@ def upsert_listing(
             "odometer": vehicle.get("odometer"),
             "odometer_type": vehicle.get("odometer_type"),
             "date_updated": now,
-            # Card is present → this listing is still live → reset the miss
-            # counter used by two-miss sold detection in lifecycle.py.
+            # Card is present → this listing is still live. Reset the legacy
+            # miss counter (the column still exists for one release cycle;
+            # nothing reads it anymore on the staged path).
             "missing_scan_count": 0,
-            # Per-session sighting stamp — Phase 2 classifier compares rows
-            # against session_start to find those absent from this run.
+            # Legacy stamp — kept for now, no longer read by the classifier.
             "last_seen_at": last_seen_stamp,
+            # Sweep sighting stamp — what Phase 2 actually compares against.
+            "last_seen_sweep_id": sweep_id,
             **extra,
         }
         if listing_dt is not None:

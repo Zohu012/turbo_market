@@ -11,6 +11,7 @@ from app.models.vehicle import (
 )
 from app.models.seller import Seller, SellerPhone
 from app.models.scrape_job import ScrapeJob
+from app.models.sweep import ScrapeSweep
 
 __all__ = [
     "Vehicle",
@@ -25,4 +26,5 @@ __all__ = [
     "Seller",
     "SellerPhone",
     "ScrapeJob",
+    "ScrapeSweep",
 ]
