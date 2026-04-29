@@ -290,28 +290,35 @@ def scrape_make_pages(
     start_page: int = 1,
     progress_callback=None,
     on_page_complete=None,
-) -> list[dict]:
+) -> tuple[list[dict], bool]:
     """
     Scrape all listing pages for a single make.
-    Returns flat list of vehicle dicts from listing cards.
+
+    Returns ``(vehicles, stopped_early)`` where ``stopped_early`` is True when
+    the run ended on a page-load failure rather than a clean "no more pages".
+    Callers must NOT mark the make as fully-done when ``stopped_early`` is True
+    — the per-page sidecar already holds the last successfully-committed page,
+    so the next run will resume from there automatically.
+
     Calls progress_callback(page_num, total_pages, new_on_page) if provided.
-    Calls on_page_complete(vehicles_on_page, page_num) after each page is parsed — use
-    this to commit per-page to DB so a later timeout doesn't lose earlier pages.
+    Calls on_page_complete(vehicles_on_page, page_num) after each page is parsed.
     """
     make_url = f"{AUTOS_URL}?q[make][]={make['id']}"
     url = make_url if start_page == 1 else f"{make_url}&page={start_page}"
     if not _goto_with_retry(page, url):
-        return []
+        return [], True
 
     total_pages = get_total_pages(page)
     if settings.max_pages > 0:
         total_pages = min(total_pages, settings.max_pages)
 
     all_vehicles = []
+    stopped_early = False
     for page_num in range(start_page, total_pages + 1):
         if page_num > start_page:
             if not _goto_with_retry(page, f"{make_url}&page={page_num}"):
                 log.warning(f"  {make['name']} p{page_num}: goto failed, stopping make.")
+                stopped_early = True
                 break
 
         vehicles = parse_listing_page(page)
@@ -335,4 +342,4 @@ def scrape_make_pages(
 
         page.wait_for_timeout(int(settings.delay_seconds * 1000))
 
-    return all_vehicles
+    return all_vehicles, stopped_early

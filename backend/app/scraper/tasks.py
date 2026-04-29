@@ -133,7 +133,7 @@ def scrape_make_task(
     live_ids: list[int] = []
 
     try:
-        vehicles = scrape_make_pages(page, make)
+        vehicles, _ = scrape_make_pages(page, make)
         counters["found"] = len(vehicles)
 
         for v in vehicles:

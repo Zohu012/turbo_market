@@ -234,17 +234,24 @@ def _run_listing(
                 _save_listing_progress(ckpt_key, make["name"], page_num)
 
             try:
-                vehicles = scrape_make_pages(
+                vehicles, stopped_early = scrape_make_pages(
                     page, make, start_page=resume_from_page, on_page_complete=_commit_page
                 )
                 log.info(
                     f"  {make['name']}: {len(vehicles)} found, "
                     f"{committed['n']} committed"
                 )
-                # Persist this make as scanned in the sweep row (set semantics,
-                # lowercase). Carries across sessions so a CF-blocked run can
-                # resume and a later session still knows what was scanned.
-                add_scanned_make(conn, sweep.id, make["name"])
+                if stopped_early:
+                    # Page-load failure mid-make — do NOT count as scanned.
+                    # Progress file already holds the last committed page so the
+                    # next run will resume from there.
+                    log.warning(
+                        f"  {make['name']}: stopped early — will resume on next run"
+                    )
+                    interrupted = True
+                else:
+                    # Clean completion — persist this make as scanned in the sweep.
+                    add_scanned_make(conn, sweep.id, make["name"])
             except Exception as e:
                 log.error(
                     f"  {make['name']} failed after page {current_page['num']}, "

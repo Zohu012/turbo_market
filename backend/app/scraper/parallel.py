@@ -776,21 +776,28 @@ def run_listing_parallel(
             )
 
         try:
-            vehicles = scrape_make_pages(
+            vehicles, stopped_early = scrape_make_pages(
                 page, make, start_page=start_page, on_page_complete=_commit_page
             )
             log.info(
                 f"  {make['name']}: {len(vehicles)} found, "
                 f"{committed_n} committed"
             )
-            # Success path only — mark done in the sidecar AND drop a
-            # human-visible breadcrumb in scraper_checkpoint.txt. On the
-            # exception path below we deliberately do nothing so the last
-            # in_flight:N from _commit_page survives for resume.
-            update_make_progress(
-                ckpt_key, make["name"], "done", 0, progress_lock
-            )
-            save_listing_progress(ckpt_key, make["name"])
+            if stopped_early:
+                # Partial run — sidecar already holds in_flight:N from the
+                # last _commit_page call. Leave it so the next session resumes
+                # from that page instead of restarting from page 1.
+                log.warning(
+                    f"  {make['name']}: stopped early due to page load failure "
+                    f"— will resume from last committed page on next run"
+                )
+            else:
+                # Clean completion — mark done in the sidecar AND drop a
+                # human-visible breadcrumb in scraper_checkpoint.txt.
+                update_make_progress(
+                    ckpt_key, make["name"], "done", 0, progress_lock
+                )
+                save_listing_progress(ckpt_key, make["name"])
         except Exception as e:
             log.error(f"  {make['name']} failed: {e}")
         finally:
