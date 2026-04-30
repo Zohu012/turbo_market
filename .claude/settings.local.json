@@ -8,7 +8,12 @@
       "Bash(py -3 -m py_compile app/scraper/seller_classifier.py)",
       "Bash(python -m py_compile backend/app/scraper/checkpoint.py backend/app/scraper/parallel.py backend/app/scraper/tasks.py backend/app/scraper/detail_scraper.py backend/scripts/run_local.py backend/app/api/v1/admin.py)",
       "Bash(py -m py_compile backend/app/scraper/checkpoint.py backend/app/scraper/parallel.py backend/app/scraper/tasks.py backend/app/scraper/detail_scraper.py backend/scripts/run_local.py backend/app/api/v1/admin.py)",
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(git stash *)",
+      "Bash(git pull *)"
     ]
   }
 }

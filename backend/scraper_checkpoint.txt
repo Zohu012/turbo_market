@@ -1,5 +1,3 @@
 listing_full:JETOUR:1
-listing_full_parallel:CFMOTO
 details_full:658
-details_full_parallel:41797
-details_update_parallel:111
+details_update_parallel:386
