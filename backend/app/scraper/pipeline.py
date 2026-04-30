@@ -154,12 +154,11 @@ def upsert_listing(
             and row["odometer"] != vehicle["odometer"]
         )
 
-        # Freshness check: re-fetch detail only if turbo.az's own "Yeniləndi"
-        # timestamp moved. A new row always needs a detail; a repost does too.
+        # Detail refresh is only needed for reactivations (handled below).
+        # Yenilendi drift alone does NOT trigger a detail fetch — price/odometer
+        # are already captured from the listing card, and specs rarely change on
+        # a simple "Yenilə" refresh. Phase 2 handles delist suspects separately.
         needs_detail = False
-        if listing_dt is not None:
-            if row["date_updated_turbo"] is None or row["date_updated_turbo"] != listing_dt:
-                needs_detail = True
 
         # Price history
         if price_changed:
