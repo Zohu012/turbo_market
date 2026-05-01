@@ -427,6 +427,7 @@ def run_details_parallel(
             return
 
         if not detail:
+            log.warning(f"  vehicle {vehicle_id}: load failed — queued for in-chunk retry")
             with counters_lock:
                 counters["load_failed"] += 1
             with failed_lock:
