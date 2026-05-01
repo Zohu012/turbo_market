@@ -340,11 +340,12 @@ def _run_details(
     mode: str,
     target_make: Optional[str] = None,
 ) -> None:
-    """Details pass — three flavours:
+    """Details pass — four flavours:
 
       mode="full"            FIFO every vehicle in DB.
       mode="full" + make     FIFO every vehicle for that make.
       mode="update"          FIFO only rows where needs_detail_refresh=TRUE.
+      mode="null_fix"        FIFO rows with raw_detail_json IS NULL (never scraped).
 
     Per-row:
       - load failure        → don't advance checkpoint; retry next run.
@@ -359,6 +360,13 @@ def _run_details(
             "WHERE needs_detail_refresh = TRUE ORDER BY id ASC"
         )
         params: tuple = ()
+    elif mode == "null_fix":
+        ckpt_key = "details_null_fix"
+        sql = (
+            "SELECT id, url FROM vehicles "
+            "WHERE raw_detail_json IS NULL ORDER BY id ASC"
+        )
+        params = ()
     elif mode == "full":
         if target_make:
             ckpt_key = "details_full_make"
@@ -382,6 +390,7 @@ def _run_details(
 
         scope_label = (
             "details-update queue" if mode == "update"
+            else "null-detail queue" if mode == "null_fix"
             else f"make '{target_make}'" if target_make
             else "all vehicles"
         )
@@ -499,6 +508,7 @@ def run(
     listing_make: Optional[str] = None,
     details_full: bool = False,
     details_update: bool = False,
+    details_null: bool = False,
     target_make: Optional[str] = None,
     parallel: bool = False,
     workers: int = 8,
@@ -522,6 +532,12 @@ def run(
                 worker_count=workers,
                 chunk_size=chunk_size,
             )
+        elif details_null:
+            run_details_parallel(
+                mode="null_fix",
+                worker_count=workers,
+                chunk_size=chunk_size,
+            )
         elif details_full:
             run_details_parallel(
                 mode="full",
@@ -532,7 +548,8 @@ def run(
         else:
             log.error(
                 "No mode specified for --parallel. Use one of: --listing-full, "
-                "--listing-make X, --details-full [--make X], --details-update"
+                "--listing-make X, --details-full [--make X], --details-update, "
+                "--details-null"
             )
         return
 
@@ -546,12 +563,15 @@ def run(
             _run_listing(browser, target_make=listing_make)
         elif details_update:
             _run_details(browser, mode="update")
+        elif details_null:
+            _run_details(browser, mode="null_fix")
         elif details_full:
             _run_details(browser, mode="full", target_make=target_make)
         else:
             log.error(
                 "No mode specified. Use one of: --listing-full, "
-                "--listing-make X, --details-full [--make X], --details-update"
+                "--listing-make X, --details-full [--make X], --details-update, "
+                "--details-null"
             )
     finally:
         browser.stop()
@@ -586,6 +606,15 @@ if __name__ == "__main__":
         help=(
             "Details pass over only rows flagged needs_detail_refresh=TRUE. "
             "Clears the flag after each successful row."
+        ),
+    )
+    mode_group.add_argument(
+        "--details-null",
+        action="store_true",
+        help=(
+            "Details pass over rows with raw_detail_json IS NULL — "
+            "vehicles that were never successfully detail-scraped (missing specs). "
+            "Safe to stop and resume. Supports --parallel."
         ),
     )
     parser.add_argument(
@@ -636,6 +665,7 @@ if __name__ == "__main__":
         listing_make=args.listing_make,
         details_full=args.details_full,
         details_update=args.details_update,
+        details_null=args.details_null,
         target_make=args.make,
         parallel=args.parallel,
         workers=args.workers,

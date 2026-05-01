@@ -125,6 +125,7 @@ HTML = """<!DOCTYPE html>
         <button id="btn-listing-parallel" style="background:#7c3aed;" title="Per-make parallelism — 8 workers scrape 8 makes concurrently. Always headless. Resumes from listing_full checkpoint at make boundaries.">Listing Full ⚡</button>
         <button id="btn-details-full-parallel" style="background:#7c3aed;" title="8 workers process the FIFO details queue concurrently. Targets ~5h for the full ~46k catalogue (vs ~62h serial). Per-make scoping when a make is selected. Chunk-based checkpoint advance every 100 rows.">Details Full ⚡</button>
         <button id="btn-details-update-parallel" style="background:#7c3aed;" title="8-worker parallel sweep of needs_detail_refresh=TRUE rows. Same fast path as Details Full ⚡, scoped to the refresh queue.">Details Update ⚡</button>
+        <button id="btn-details-null-parallel" style="background:#0e7490;" title="Fix missing specs: 8-worker parallel sweep of vehicles where raw_detail_json IS NULL — never successfully detail-scraped. Covers both active and inactive rows. Safe to stop and resume.">Fix Null Details ⚡</button>
         <label style="margin-left:12px;">workers</label>
         <input type="number" id="parallel-workers" value="8" min="1" max="20" style="width:60px;" title="Number of concurrent Playwright workers (each with its own persistent profile dir). Conservative: 6-8. Aggressive: 12-16 (more RAM, higher CF risk)." />
       </div>
@@ -201,7 +202,8 @@ async function refreshStatus() {
     $('stat-pid').textContent = s.pid || '—';
 
     ['btn-listing-full','btn-listing-make','btn-details-update','btn-details-make',
-     'btn-listing-parallel','btn-details-full-parallel','btn-details-update-parallel'
+     'btn-listing-parallel','btn-details-full-parallel','btn-details-update-parallel',
+     'btn-details-null-parallel'
     ].forEach(id => $(id).disabled = s.running);
     $('btn-stop').disabled = !s.running;
 
@@ -284,6 +286,10 @@ $('btn-details-full-parallel').onclick = () => {
 $('btn-details-update-parallel').onclick = () => {
   if (!confirm(`Details Update ⚡ sweeps the needs_detail_refresh=TRUE queue with ${_workers()} parallel workers. Continue?`)) return;
   start({ mode: 'details-update', parallel: '1', workers: _workers() });
+};
+$('btn-details-null-parallel').onclick = () => {
+  if (!confirm(`Fix Null Details ⚡ scrapes every vehicle with missing raw_detail_json (never detail-scraped) using ${_workers()} parallel workers. Safe to stop and resume. Continue?`)) return;
+  start({ mode: 'details-null', parallel: '1', workers: _workers() });
 };
 $('btn-stop').onclick = async () => {
   if (!confirm('Stop scraper?')) return;
@@ -395,7 +401,7 @@ def api_start(
     workers: int | None = Query(None),
     chunk_size: int | None = Query(None),
 ):
-    """mode: listing-full | listing-make | details-full | details-update | details-make
+    """mode: listing-full | listing-make | details-full | details-update | details-make | details-null
 
     `parallel` (truthy "1"/"true") routes to the multi-worker runner in
     backend/app/scraper/parallel.py. `workers` and `chunk_size` are forwarded
@@ -420,6 +426,8 @@ def api_start(
         args += ["--details-full", "--make", make]
     elif mode == "details-update":
         args += ["--details-update"]
+    elif mode == "details-null":
+        args += ["--details-null"]
     else:
         return JSONResponse({"error": f"unknown mode: {mode}"}, status_code=400)
 

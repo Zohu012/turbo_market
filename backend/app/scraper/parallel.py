@@ -221,6 +221,8 @@ def run_details_parallel(
       mode="full"             FIFO every vehicle in DB
       mode="full" + make      FIFO every vehicle for that make
       mode="update"           FIFO only rows with needs_detail_refresh=TRUE
+      mode="null_fix"         FIFO active vehicles with raw_detail_json IS NULL
+                              (never successfully scraped — missing specs)
 
     Returns counters dict: {processed, delisted, load_failed, total}.
     """
@@ -231,6 +233,13 @@ def run_details_parallel(
             "WHERE needs_detail_refresh = TRUE ORDER BY id ASC"
         )
         params: tuple = ()
+    elif mode == "null_fix":
+        ckpt_key = "details_null_fix_parallel"
+        sql = (
+            "SELECT id, url FROM vehicles "
+            "WHERE raw_detail_json IS NULL ORDER BY id ASC"
+        )
+        params = ()
     elif mode == "full":
         if target_make:
             ckpt_key = "details_full_make_parallel"
