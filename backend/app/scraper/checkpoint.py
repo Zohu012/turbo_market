@@ -9,9 +9,11 @@ Layout of `backend/scraper_checkpoint.txt`:
     details_full:11761
     details_full_make:Chevrolet:11761
     details_update:5234
+    details_null_fix:9100
     details_full_parallel:18002
     details_full_make_parallel:BMW:18002
     details_update_parallel:7400
+    details_null_fix_parallel:9100
 
 Each line is `key:value`. Listing keys store `make[:page]`; details keys store
 the highest fully-completed `vehicle.id`. Each UI button gets its own key so
@@ -43,9 +45,11 @@ _CHECKPOINT_KEYS = (
     "details_full",
     "details_full_make",
     "details_update",
+    "details_null_fix",
     "details_full_parallel",
     "details_full_make_parallel",
     "details_update_parallel",
+    "details_null_fix_parallel",
 )
 
 
