@@ -237,7 +237,14 @@ def run_details_parallel(
         ckpt_key = "details_null_fix_parallel"
         sql = (
             "SELECT id, url FROM vehicles "
-            "WHERE raw_detail_json IS NULL ORDER BY id ASC"
+            "WHERE raw_detail_json IS NULL "
+            "   OR (status = 'active' AND ("
+            "         fuel_type IS NULL"
+            "      OR color IS NULL"
+            "      OR body_type IS NULL"
+            "      OR transmission IS NULL"
+            "   )) "
+            "ORDER BY id ASC"
         )
         params = ()
     elif mode == "full":
