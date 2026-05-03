@@ -12,22 +12,22 @@ const NAV: NavItem[] = [
   { label: AZ.dashboards.overview, to: "/analytics", active: true },
   // Qiymət
   { label: AZ.dashboards.price, to: "/analytics/price", active: true },
-  { label: "Qiymət dəyişməsi", to: "/analytics/price-drops", active: false },
-  { label: "Endirim analizi", to: "/analytics/discounts", active: false },
+  { label: AZ.dashboards.priceDrops, to: "/analytics/price-drops", active: true },
+  { label: AZ.dashboards.discounts, to: "/analytics/discounts", active: true },
   // Likvidlik
   { label: AZ.dashboards.dts, to: "/analytics/dts", active: true },
-  { label: "Köhnəlmiş elanlar", to: "/analytics/ageing", active: false },
+  { label: AZ.dashboards.ageing, to: "/analytics/ageing", active: true },
   // Marka & Model
-  { label: AZ.dashboards.makemodel, to: "/analytics/vehicle", active: false },
-  { label: "Likvidlik analizi", to: "/analytics/liquidity", active: false },
-  { label: "Xüsusiyyət təsiri", to: "/analytics/features", active: false },
-  { label: "Vəziyyət analizi", to: "/analytics/condition", active: false },
-  { label: "Bazar trendi", to: "/analytics/trends", active: false },
-  { label: "Şəhər / region", to: "/analytics/cities", active: false },
+  { label: AZ.dashboards.makemodel, to: "/analytics/vehicle", active: true },
+  { label: AZ.dashboards.liquidity, to: "/analytics/liquidity", active: true },
+  { label: AZ.dashboards.features, to: "/analytics/features", active: true },
+  { label: AZ.dashboards.condition, to: "/analytics/condition", active: true },
+  { label: AZ.dashboards.trends, to: "/analytics/trends", active: true },
+  { label: AZ.dashboards.cities, to: "/analytics/cities", active: true },
   // Satıcılar
-  { label: "Rəqib analizi", to: "/analytics/competitors", active: false },
-  { label: "Qiymət tövsiyəsi", to: "/analytics/pricing", active: false },
-  { label: "Fürsət axtarışı", to: "/analytics/opportunities", active: false },
+  { label: AZ.dashboards.competitors, to: "/analytics/competitors", active: true },
+  { label: AZ.dashboards.pricing, to: "/analytics/pricing", active: true },
+  { label: AZ.dashboards.opportunities, to: "/analytics/opportunities", active: true },
   { label: "Hesabat ixracı", to: "/analytics/export", active: false },
 ];
 

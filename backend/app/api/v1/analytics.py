@@ -16,6 +16,15 @@ from app.services.analytics_overview import router as overview_router
 from app.services.analytics_price import router as price_router
 from app.services.analytics_dts import router as dts_router
 from app.services.analytics_makemodel import router as makemodel_router
+from app.services.analytics_price_drops import router as price_drops_router
+from app.services.analytics_ageing import router as ageing_router
+from app.services.analytics_liquidity import router as liquidity_router
+from app.services.analytics_features import router as features_router
+from app.services.analytics_condition import router as condition_router
+from app.services.analytics_trends import router as trends_router
+from app.services.analytics_cities import router as cities_router
+from app.services.analytics_competitors import router as competitors_router
+from app.services.analytics_opportunities import router as opportunities_router
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -93,3 +102,12 @@ router.include_router(overview_router)
 router.include_router(price_router)
 router.include_router(dts_router)
 router.include_router(makemodel_router)
+router.include_router(price_drops_router)
+router.include_router(ageing_router)
+router.include_router(liquidity_router)
+router.include_router(features_router)
+router.include_router(condition_router)
+router.include_router(trends_router)
+router.include_router(cities_router)
+router.include_router(competitors_router)
+router.include_router(opportunities_router)

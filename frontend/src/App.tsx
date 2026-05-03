@@ -10,6 +10,16 @@ import OverviewDashboard from "./pages/analytics/OverviewDashboard";
 import MarketPriceDashboard from "./pages/analytics/MarketPriceDashboard";
 import DaysToSellDashboard from "./pages/analytics/DaysToSellDashboard";
 import MakeModelDashboard from "./pages/analytics/MakeModelDashboard";
+import PriceDropsDashboard from "./pages/analytics/PriceDropsDashboard";
+import AgeingDashboard from "./pages/analytics/AgeingDashboard";
+import LiquidityDashboard from "./pages/analytics/LiquidityDashboard";
+import FeaturesDashboard from "./pages/analytics/FeaturesDashboard";
+import ConditionDashboard from "./pages/analytics/ConditionDashboard";
+import TrendsDashboard from "./pages/analytics/TrendsDashboard";
+import CitiesDashboard from "./pages/analytics/CitiesDashboard";
+import CompetitorsDashboard from "./pages/analytics/CompetitorsDashboard";
+import PricingDashboard from "./pages/analytics/PricingDashboard";
+import OpportunitiesDashboard from "./pages/analytics/OpportunitiesDashboard";
 import ComingSoon from "./pages/analytics/ComingSoon";
 
 const navClass = ({ isActive }: { isActive: boolean }) =>
@@ -64,7 +74,18 @@ export default function App() {
             <Route path="price" element={<MarketPriceDashboard />} />
             <Route path="dts" element={<DaysToSellDashboard />} />
             <Route path="vehicle" element={<MakeModelDashboard />} />
-            {/* Catch-all for the 12 coming-soon dashboards */}
+            <Route path="price-drops" element={<PriceDropsDashboard />} />
+            <Route path="discounts" element={<PriceDropsDashboard />} />
+            <Route path="ageing" element={<AgeingDashboard />} />
+            <Route path="liquidity" element={<LiquidityDashboard />} />
+            <Route path="features" element={<FeaturesDashboard />} />
+            <Route path="condition" element={<ConditionDashboard />} />
+            <Route path="trends" element={<TrendsDashboard />} />
+            <Route path="cities" element={<CitiesDashboard />} />
+            <Route path="competitors" element={<CompetitorsDashboard />} />
+            <Route path="pricing" element={<PricingDashboard />} />
+            <Route path="opportunities" element={<OpportunitiesDashboard />} />
+            {/* Catch-all for future dashboards */}
             <Route path=":slug" element={<ComingSoon />} />
           </Route>
 
