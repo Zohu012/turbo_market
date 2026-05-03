@@ -1,11 +1,16 @@
 import { Routes, Route, NavLink, Outlet, useNavigate } from "react-router-dom";
 import DealerTool from "./pages/DealerTool";
-import Analytics from "./pages/Analytics";
 import AdminDashboard from "./pages/AdminDashboard";
 import SellerProfile from "./pages/SellerProfile";
 import VehicleDetail from "./pages/VehicleDetail";
 import Login from "./pages/Login";
 import PrivateRoute from "./components/PrivateRoute";
+import AnalyticsLayout from "./components/analytics/AnalyticsLayout";
+import OverviewDashboard from "./pages/analytics/OverviewDashboard";
+import MarketPriceDashboard from "./pages/analytics/MarketPriceDashboard";
+import DaysToSellDashboard from "./pages/analytics/DaysToSellDashboard";
+import MakeModelDashboard from "./pages/analytics/MakeModelDashboard";
+import ComingSoon from "./pages/analytics/ComingSoon";
 
 const navClass = ({ isActive }: { isActive: boolean }) =>
   `px-4 py-2 rounded-md text-sm font-medium transition-colors ${
@@ -52,7 +57,17 @@ export default function App() {
       <Route element={<PrivateRoute />}>
         <Route element={<Layout />}>
           <Route path="/" element={<DealerTool />} />
-          <Route path="/analytics" element={<Analytics />} />
+
+          {/* Analytics — nested routes under shared layout with global filters */}
+          <Route path="/analytics" element={<AnalyticsLayout />}>
+            <Route index element={<OverviewDashboard />} />
+            <Route path="price" element={<MarketPriceDashboard />} />
+            <Route path="dts" element={<DaysToSellDashboard />} />
+            <Route path="vehicle" element={<MakeModelDashboard />} />
+            {/* Catch-all for the 12 coming-soon dashboards */}
+            <Route path=":slug" element={<ComingSoon />} />
+          </Route>
+
           <Route path="/admin" element={<AdminDashboard />} />
           <Route path="/sellers/:id" element={<SellerProfile />} />
           <Route path="/vehicles/:turboId" element={<VehicleDetail />} />

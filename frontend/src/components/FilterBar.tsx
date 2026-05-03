@@ -1,5 +1,4 @@
-import { useEffect, useState } from "react";
-import { vehiclesApi } from "../api/client";
+import { useMakeModelOptions } from "../hooks/useMakeModelOptions";
 
 export interface Filters {
   make: string;
@@ -33,20 +32,7 @@ interface Props {
 }
 
 export default function FilterBar({ filters, onChange }: Props) {
-  const [makes, setMakes] = useState<string[]>([]);
-  const [models, setModels] = useState<string[]>([]);
-
-  useEffect(() => {
-    vehiclesApi.makes().then((r) => setMakes(r.data.makes));
-  }, []);
-
-  useEffect(() => {
-    if (filters.make) {
-      vehiclesApi.models(filters.make).then((r) => setModels(r.data.models));
-    } else {
-      setModels([]);
-    }
-  }, [filters.make]);
+  const { makes, models } = useMakeModelOptions(filters.make);
 
   const set = (key: keyof Filters, value: string) =>
     onChange({ ...filters, [key]: value, ...(key === "make" ? { model: "" } : {}) });
