@@ -73,15 +73,15 @@ export default function OverviewDashboard() {
           value={kpis?.price_trend_30d_pct as number}
           format="raw"
           tone={(kpis?.price_trend_30d_pct as number) > 0 ? "good" : (kpis?.price_trend_30d_pct as number) < 0 ? "bad" : "default"}
-          sub={kpis?.price_trend_30d_pct != null ? `${kpis.price_trend_30d_pct}%` : undefined}
+          sub={kpis?.price_trend_30d_pct != null ? `${kpis.price_trend_30d_pct as number}%` : undefined}
           loading={kLoading}
         />
       </div>
 
       {/* Segment highlights */}
-      {!kLoading && (kpis?.fastest_segment || kpis?.slowest_segment) && (
+      {!kLoading && !!(kpis?.fastest_segment || kpis?.slowest_segment) && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {kpis?.fastest_segment && (
+          {!!kpis?.fastest_segment && (
             <div className="bg-green-50 border border-green-200 rounded-lg p-3 text-sm">
               <span className="font-semibold text-green-700">⚡ Ən tez satan: </span>
               <span className="text-green-900">
@@ -92,7 +92,7 @@ export default function OverviewDashboard() {
               </span>
             </div>
           )}
-          {kpis?.slowest_segment && (
+          {!!kpis?.slowest_segment && (
             <div className="bg-orange-50 border border-orange-200 rounded-lg p-3 text-sm">
               <span className="font-semibold text-orange-700">🐢 Ən yavaş satan: </span>
               <span className="text-orange-900">
@@ -141,7 +141,7 @@ export default function OverviewDashboard() {
             <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
             <XAxis dataKey="period" tick={{ fontSize: 10 }} />
             <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `${Math.round(v / 1000)}k`} />
-            <Tooltip formatter={fmtAzn} />
+            <Tooltip formatter={(v) => fmtAzn(v as number)} />
             <Legend />
             <Line type="monotone" dataKey="avg_price" name="Ortalama" stroke="#2563eb" dot={false} strokeWidth={2} />
             <Line type="monotone" dataKey="median_price" name="Median" stroke="#16a34a" dot={false} strokeWidth={2} strokeDasharray="4 2" />

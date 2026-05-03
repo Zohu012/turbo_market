@@ -132,7 +132,7 @@ export default function MarketPriceDashboard() {
             <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
             <XAxis dataKey="year" tick={{ fontSize: 10 }} />
             <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `${Math.round(v / 1000)}k`} />
-            <Tooltip formatter={fmtAzn} />
+            <Tooltip formatter={(v) => fmtAzn(v as number)} />
             <Bar dataKey="median" name="Median" fill="#2563eb" />
           </BarChart>
         </ChartCard>
@@ -155,7 +155,7 @@ export default function MarketPriceDashboard() {
           <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
           <XAxis dataKey="period" tick={{ fontSize: 10 }} />
           <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `${Math.round(v / 1000)}k`} />
-          <Tooltip formatter={fmtAzn} />
+          <Tooltip formatter={(v) => fmtAzn(v as number)} />
           <Line type="monotone" dataKey="avg" name="Ortalama" stroke="#2563eb" dot={false} strokeWidth={2} />
           <Line type="monotone" dataKey="median" name="Median" stroke="#16a34a" dot={false} strokeWidth={2} strokeDasharray="4 2" />
         </LineChart>
@@ -168,7 +168,7 @@ export default function MarketPriceDashboard() {
             <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
             <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={(v) => `${Math.round(v / 1000)}k`} />
             <YAxis dataKey="city" type="category" tick={{ fontSize: 9 }} width={55} />
-            <Tooltip formatter={fmtAzn} />
+            <Tooltip formatter={(v) => fmtAzn(v as number)} />
             <Bar dataKey="median" name="Median" fill="#2563eb" />
           </BarChart>
         </ChartCard>
@@ -178,7 +178,7 @@ export default function MarketPriceDashboard() {
             <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
             <XAxis dataKey="seller_type" tick={{ fontSize: 10 }} />
             <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `${Math.round(v / 1000)}k`} />
-            <Tooltip formatter={fmtAzn} />
+            <Tooltip formatter={(v) => fmtAzn(v as number)} />
             <Bar dataKey="median" name="Median" fill="#8b5cf6" />
           </BarChart>
         </ChartCard>
@@ -188,7 +188,7 @@ export default function MarketPriceDashboard() {
             <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
             <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={(v) => `${Math.round(v / 1000)}k`} />
             <YAxis dataKey="condition" type="category" tick={{ fontSize: 8 }} width={95} />
-            <Tooltip formatter={fmtAzn} />
+            <Tooltip formatter={(v) => fmtAzn(v as number)} />
             <Bar dataKey="median" name="Median" fill="#16a34a" />
           </BarChart>
         </ChartCard>

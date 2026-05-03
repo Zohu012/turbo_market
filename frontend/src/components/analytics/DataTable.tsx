@@ -47,7 +47,7 @@ export default function DataTable<T>({
     data,
     columns,
     state: { sorting },
-    onSortingChange: setSorting,
+    onSortingChange: (updater) => setSorting(typeof updater === "function" ? updater(sorting) : updater),
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: manualSorting ? undefined : getSortedRowModel(),
     manualPagination,

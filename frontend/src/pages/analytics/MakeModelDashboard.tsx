@@ -219,7 +219,7 @@ export default function MakeModelDashboard() {
             <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
             <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={(v) => `${Math.round(v / 1000)}k`} />
             <YAxis dataKey="city" type="category" tick={{ fontSize: 9 }} width={55} />
-            <Tooltip formatter={fmtAzn} />
+            <Tooltip formatter={(v) => fmtAzn(v as number)} />
             <Bar dataKey="median" name="Median" fill="#2563eb" />
           </BarChart>
         </ChartCard>
@@ -232,7 +232,7 @@ export default function MakeModelDashboard() {
             <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
             <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={(v) => `${Math.round(v / 1000)}k`} />
             <YAxis dataKey="condition" type="category" tick={{ fontSize: 8 }} width={95} />
-            <Tooltip formatter={fmtAzn} />
+            <Tooltip formatter={(v) => fmtAzn(v as number)} />
             <Bar dataKey="median" name="Median" fill="#16a34a" />
           </BarChart>
         </ChartCard>
@@ -242,7 +242,7 @@ export default function MakeModelDashboard() {
             <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
             <XAxis dataKey="transmission" tick={{ fontSize: 10 }} />
             <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `${Math.round(v / 1000)}k`} />
-            <Tooltip formatter={fmtAzn} />
+            <Tooltip formatter={(v) => fmtAzn(v as number)} />
             <Bar dataKey="median" name="Median" fill="#8b5cf6" />
           </BarChart>
         </ChartCard>
