@@ -47,15 +47,32 @@ async def ageing_kpis(
                     func.count().filter(age > 90).label("over_90d"),
                     func.avg(age).filter(age > 30).label("avg_days_over30"),
                     func.sum(Vehicle.price_azn).filter(age > 60).label("value_over60"),
-                    func.avg(Vehicle.price_azn).filter(age > 30).label("avg_price_ageing"),
-                    func.avg(Vehicle.price_azn).filter(age <= 30).label("avg_price_fresh"),
-                    percentile(Vehicle.price_azn, 0.5).filter(age > 30).label("median_price_ageing"),
-                    percentile(Vehicle.price_azn, 0.5).filter(age <= 30).label("median_price_fresh"),
                 ),
                 filters,
                 default_status="active",
             )
         )).one()
+
+        # PERCENTILE_CONT (ordered-set aggregate) does not support FILTER clause in
+        # PostgreSQL — compute conditional medians via separate subqueries instead.
+        ageing_sq = apply_filters(
+            select(Vehicle.price_azn),
+            filters,
+            default_status="active",
+        ).where(_age_expr(now) > 30, Vehicle.price_azn.isnot(None)).subquery()
+
+        fresh_sq = apply_filters(
+            select(Vehicle.price_azn),
+            filters,
+            default_status="active",
+        ).where(_age_expr(now) <= 30, Vehicle.price_azn.isnot(None)).subquery()
+
+        median_ageing = await db.scalar(
+            select(percentile(ageing_sq.c.price_azn, 0.5)).select_from(ageing_sq)
+        )
+        median_fresh = await db.scalar(
+            select(percentile(fresh_sq.c.price_azn, 0.5)).select_from(fresh_sq)
+        )
 
         return {
             "over_30d": row.over_30d or 0,
@@ -63,10 +80,8 @@ async def ageing_kpis(
             "over_90d": row.over_90d or 0,
             "avg_days_over_30d": safe_round(row.avg_days_over30, 1),
             "value_tied_over_60d_azn": safe_round(row.value_over60, 0),
-            "avg_price_ageing": safe_round(row.avg_price_ageing, 0),
-            "avg_price_fresh": safe_round(row.avg_price_fresh, 0),
-            "median_price_ageing": safe_round(row.median_price_ageing, 0),
-            "median_price_fresh": safe_round(row.median_price_fresh, 0),
+            "median_price_ageing": safe_round(median_ageing, 0),
+            "median_price_fresh": safe_round(median_fresh, 0),
         }
 
     return await cache_aggregate(f"ageing/kpis:{filters.cache_key()}", 300, compute)
