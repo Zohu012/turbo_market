@@ -212,7 +212,7 @@ def scrape_detail(page: Page, url: str) -> dict:
             ".product-properties__i, .product-properties li",
             """els => els.map(el => {
                 const label = el.querySelector('.product-properties__i-name, label, .key');
-                const value = el.querySelector('.product-properties__i-value, span, .value');
+                const value = el.querySelector('.product-properties__i-value, .value') || el.lastElementChild;
                 return {
                     key: label ? label.textContent.trim() : '',
                     val: value ? value.textContent.trim() : ''
