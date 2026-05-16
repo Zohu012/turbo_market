@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { vehiclesApi, type FeatureOption } from "../api/client";
 import { useMakeModelOptions } from "../hooks/useMakeModelOptions";
+import SearchableSelect from "./SearchableSelect";
 
 export interface Filters {
   // Vehicle
@@ -64,7 +65,8 @@ export const defaultFilters: Filters = {
 
 interface Props {
   filters: Filters;
-  onChange: (f: Filters) => void;
+  setFilters: (partial: Partial<Filters>, immediate?: boolean) => void;
+  resetFilters: () => void;
 }
 
 const BODY_TYPES = ["Sedan", "Offroader / SUV", "Hetçbek", "Universal", "Kupé", "Kabriolet", "Pikap", "Furqon"];
@@ -80,7 +82,7 @@ const BOOL_OPTS = [
   { value: "false", label: "Xeyr" },
 ];
 
-export default function FilterBar({ filters, onChange }: Props) {
+export default function FilterBar({ filters, setFilters, resetFilters }: Props) {
   const { makes, models } = useMakeModelOptions(filters.make);
   const [featureOptions, setFeatureOptions] = useState<FeatureOption[]>([]);
   const [featureSearch, setFeatureSearch] = useState("");
@@ -90,13 +92,13 @@ export default function FilterBar({ filters, onChange }: Props) {
     vehiclesApi.features().then((r) => setFeatureOptions(r.data)).catch(() => {});
   }, []);
 
-  const set = (key: keyof Filters, value: string) =>
-    onChange({ ...filters, [key]: value, ...(key === "make" ? { model: "" } : {}) });
+  const set = (key: keyof Filters) => (value: string) =>
+    setFilters({ [key]: value || undefined });
 
   const sel = (key: keyof Filters, opts: string[] | Array<{ value: string; label: string }>, label: string) => (
     <select
       value={filters[key]}
-      onChange={(e) => set(key, e.target.value)}
+      onChange={(e) => set(key)(e.target.value)}
       className="border rounded px-2 py-1.5 text-sm bg-white w-full"
     >
       <option value="">{label}</option>
@@ -115,7 +117,7 @@ export default function FilterBar({ filters, onChange }: Props) {
       type={type}
       placeholder={placeholder}
       value={filters[key]}
-      onChange={(e) => set(key, e.target.value)}
+      onChange={(e) => set(key)(e.target.value)}
       className="border rounded px-2 py-1.5 text-sm w-full"
     />
   );
@@ -128,7 +130,7 @@ export default function FilterBar({ filters, onChange }: Props) {
     const next = selectedFeatureIds.includes(id)
       ? selectedFeatureIds.filter((x) => x !== id)
       : [...selectedFeatureIds, id];
-    set("features", next.join(","));
+    setFilters({ features: next.length ? next.join(",") : undefined }, true);
   };
 
   const filteredFeatures = featureOptions.filter((f) =>
@@ -154,8 +156,18 @@ export default function FilterBar({ filters, onChange }: Props) {
         <SectionHeader id="vehicle" title="Avtomobil" />
         {openSection === "vehicle" && (
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-2">
-            {sel("make", makes.map((m) => ({ value: m, label: m })), "Bütün markalar")}
-            {sel("model", models.map((m) => ({ value: m, label: m })), "Bütün modellər")}
+            <SearchableSelect
+              value={filters.make}
+              onChange={(v) => setFilters({ make: v || undefined }, true)}
+              placeholder="Bütün markalar"
+              options={makes.map((m) => ({ value: m, label: m }))}
+            />
+            <SearchableSelect
+              value={filters.model}
+              onChange={(v) => setFilters({ model: v || undefined }, true)}
+              placeholder="Bütün modellər"
+              options={models.map((m) => ({ value: m, label: m }))}
+            />
             {inp("year_min", "İl (min)", "number")}
             {inp("year_max", "İl (max)", "number")}
             {sel("body_type", BODY_TYPES, "Ban növü")}
@@ -203,22 +215,6 @@ export default function FilterBar({ filters, onChange }: Props) {
             {inp("days_to_sell_min", "Satış günü (min)", "number")}
             {inp("days_to_sell_max", "Satış günü (max)", "number")}
             {sel("status", [{ value: "active", label: "Aktiv" }, { value: "inactive", label: "Deaktiv" }], "Status")}
-            <select
-              value={`${filters.sort_by}:${filters.sort_dir}`}
-              onChange={(e) => {
-                const [sort_by, sort_dir] = e.target.value.split(":");
-                onChange({ ...filters, sort_by, sort_dir });
-              }}
-              className="border rounded px-2 py-1.5 text-sm bg-white w-full"
-            >
-              <option value="date_added:desc">Ən yeni əvvəl</option>
-              <option value="date_added:asc">Ən köhnə əvvəl</option>
-              <option value="price_azn:asc">Qiymət ↑</option>
-              <option value="price_azn:desc">Qiymət ↓</option>
-              <option value="year:desc">İl ↓</option>
-              <option value="odometer:asc">Yürüş ↑</option>
-              <option value="days_to_sell:asc">Satış günü ↑</option>
-            </select>
           </div>
         )}
       </div>
@@ -257,7 +253,7 @@ export default function FilterBar({ filters, onChange }: Props) {
       {/* Reset button */}
       <div className="flex justify-end pt-1 border-t">
         <button
-          onClick={() => onChange(defaultFilters)}
+          onClick={resetFilters}
           className="border rounded px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 transition-colors"
         >
           Sıfırla

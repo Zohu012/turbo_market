@@ -1,7 +1,7 @@
-import { useEffect, useState, useCallback } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
 import { vehiclesApi, type Vehicle, type PagedResponse, type VehicleKpis } from "../api/client";
-import FilterBar, { defaultFilters, type Filters } from "../components/FilterBar";
+import FilterBar from "../components/FilterBar";
+import { useInventoryFilters } from "../hooks/useInventoryFilters";
 
 const fmt = (n: number | null | undefined, currency?: string | null) =>
   n == null ? "—" : `${Math.round(n).toLocaleString()} ${currency ?? "AZN"}`;
@@ -18,57 +18,60 @@ function KpiCard({ label, value }: { label: string; value: string }) {
   );
 }
 
-function filtersToParams(f: Filters): Record<string, unknown> {
-  const params: Record<string, unknown> = {};
-  const keys = Object.keys(f) as (keyof Filters)[];
-  for (const k of keys) {
-    if (f[k] !== "" && f[k] !== undefined) {
-      // split sort_by / sort_dir from the compound key
-      if (k === "sort_by" || k === "sort_dir") {
-        params[k] = f[k];
-      } else {
-        params[k] = f[k];
-      }
-    }
-  }
-  return params;
-}
+const Th = ({ children }: { children: React.ReactNode }) => (
+  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wide whitespace-nowrap">
+    {children}
+  </th>
+);
 
 export default function DealerTool() {
-  const [filters, setFilters] = useState<Filters>(defaultFilters);
+  const { filters, setFilters, resetFilters, toParams } = useInventoryFilters();
   const [data, setData] = useState<PagedResponse<Vehicle> | null>(null);
   const [kpis, setKpis] = useState<VehicleKpis | null>(null);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
 
-  const load = useCallback(async (f: Filters, p: number) => {
+  const params = toParams();
+  const paramsKey = useMemo(() => JSON.stringify(params), [params]); // eslint-disable-line
+
+  useEffect(() => { setPage(1); }, [paramsKey]);
+
+  useEffect(() => {
+    let cancelled = false;
     setLoading(true);
-    try {
-      const params = { ...filtersToParams(f), page: p, page_size: 50 };
-      const [listRes, kpisRes] = await Promise.all([
-        vehiclesApi.list(params),
-        vehiclesApi.kpis(filtersToParams(f)),
-      ]);
-      setData(listRes.data);
-      setKpis(kpisRes.data);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    Promise.all([
+      vehiclesApi.list({ ...params, page, page_size: 50 }),
+      vehiclesApi.kpis(params),
+    ]).then(([listRes, kpisRes]) => {
+      if (!cancelled) {
+        setData(listRes.data);
+        setKpis(kpisRes.data);
+      }
+    }).finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [paramsKey, page]); // eslint-disable-line
 
-  useEffect(() => {
-    setPage(1);
-    load(filters, 1);
-  }, [filters, load]);
+  const toggleSort = (col: string) => {
+    const dir = filters.sort_by === col && filters.sort_dir === "asc" ? "desc" : "asc";
+    setFilters({ sort_by: col, sort_dir: dir }, true);
+  };
 
-  useEffect(() => {
-    load(filters, page);
-  }, [page]); // eslint-disable-line
+  const SortTh = ({ col, label }: { col: string; label: string }) => (
+    <th
+      className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wide whitespace-nowrap cursor-pointer select-none hover:bg-gray-100"
+      onClick={() => toggleSort(col)}
+    >
+      {label}{" "}
+      {filters.sort_by === col
+        ? (filters.sort_dir === "asc" ? "↑" : "↓")
+        : <span className="text-gray-300">↕</span>}
+    </th>
+  );
 
   return (
     <div>
       <h1 className="text-2xl font-bold mb-4">Vehicle Inventory</h1>
-      <FilterBar filters={filters} onChange={(f) => { setFilters(f); setPage(1); }} />
+      <FilterBar filters={filters} setFilters={setFilters} resetFilters={resetFilters} />
 
       {/* KPIs */}
       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2 mb-4">
@@ -98,9 +101,18 @@ export default function DealerTool() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 border-b">
               <tr>
-                {["Photo", "Make / Model", "Year", "Price (AZN)", "Odometer", "Color", "Fuel", "Gearbox", "City", "Status", "Added", "Days to sell"].map((h) => (
-                  <th key={h} className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
-                ))}
+                <Th>Photo</Th>
+                <Th>Make / Model</Th>
+                <SortTh col="year" label="Year" />
+                <SortTh col="price_azn" label="Price (AZN)" />
+                <SortTh col="odometer" label="Odometer" />
+                <Th>Color</Th>
+                <Th>Fuel</Th>
+                <Th>Gearbox</Th>
+                <Th>City</Th>
+                <Th>Status</Th>
+                <SortTh col="date_added" label="Added" />
+                <SortTh col="days_to_sell" label="Days to sell" />
               </tr>
             </thead>
             <tbody className="divide-y">
@@ -119,9 +131,14 @@ export default function DealerTool() {
                       )}
                     </td>
                     <td className="px-3 py-2">
-                      <Link to={`/vehicles/${v.turbo_id}`} className="font-medium text-blue-600 hover:underline">
+                      <a
+                        href={`/vehicles/${v.turbo_id}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-medium text-blue-600 hover:underline"
+                      >
                         {v.make} {v.model}
-                      </Link>
+                      </a>
                     </td>
                     <td className="px-3 py-2">{v.year ?? "—"}</td>
                     <td className="px-3 py-2 font-medium">{fmt(v.price_azn)}</td>
