@@ -116,6 +116,24 @@ def apply_filters(
             Vehicle.date_added
             < datetime.combine(filters.date_to, time.max, tzinfo=timezone.utc)
         )
+    if filters.date_sold_from is not None:
+        clauses.append(
+            Vehicle.date_deactivated
+            >= datetime.combine(filters.date_sold_from, time.min, tzinfo=timezone.utc)
+        )
+    if filters.date_sold_to is not None:
+        clauses.append(
+            Vehicle.date_deactivated
+            < datetime.combine(filters.date_sold_to, time.max, tzinfo=timezone.utc)
+        )
+    if filters.is_new is not None:
+        clauses.append(Vehicle.is_new == filters.is_new)
+    if filters.is_on_order is not None:
+        clauses.append(Vehicle.is_on_order == filters.is_on_order)
+    if filters.credit is not None:
+        clauses.append(Vehicle.is_credit == filters.credit)
+    if filters.barter is not None:
+        clauses.append(Vehicle.is_barter == filters.barter)
 
     # Features: AND across all selected (vehicle has every requested feature)
     if filters.features:

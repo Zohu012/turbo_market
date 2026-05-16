@@ -65,7 +65,12 @@ class AnalyticsFilters(BaseModel):
     status: Optional[str] = None
     date_from: Optional[date] = None
     date_to: Optional[date] = None
+    date_sold_from: Optional[date] = None
+    date_sold_to: Optional[date] = None
     features: Optional[list[int]] = Field(default=None, max_length=10)
+    # --- New flag filters ---
+    is_new: Optional[bool] = None
+    is_on_order: Optional[bool] = None
 
     # ---- FastAPI Depends adapter ----
     @classmethod
@@ -101,9 +106,13 @@ class AnalyticsFilters(BaseModel):
         status: Optional[str] = Query(None, pattern="^(active|inactive)$"),
         date_from: Optional[date] = Query(None),
         date_to: Optional[date] = Query(None),
+        date_sold_from: Optional[date] = Query(None),
+        date_sold_to: Optional[date] = Query(None),
         features: Optional[str] = Query(
             None, description="Comma-separated feature IDs, max 10"
         ),
+        is_new: Optional[bool] = Query(None),
+        is_on_order: Optional[bool] = Query(None),
     ) -> "AnalyticsFilters":
         feature_ids: Optional[list[int]] = None
         if features:
@@ -124,7 +133,9 @@ class AnalyticsFilters(BaseModel):
             currency=currency, credit=credit, barter=barter,
             seller_type=seller_type, status=status,
             date_from=date_from, date_to=date_to,
+            date_sold_from=date_sold_from, date_sold_to=date_sold_to,
             features=feature_ids,
+            is_new=is_new, is_on_order=is_on_order,
         )
 
     def cache_key(self) -> str:

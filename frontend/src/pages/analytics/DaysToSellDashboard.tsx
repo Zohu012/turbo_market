@@ -21,7 +21,7 @@ interface DtsKpis {
   ageing_inventory_count: number | null;
 }
 interface BandRow { band: string; avg_dts: number | null; median_dts: number | null; count: number }
-interface MakeModelRow { make: string; model: string; avg_dts: number | null; count: number }
+interface MakeModelRow { make: string; model: string; year: number | null; avg_dts: number | null; median_dts: number | null; count: number }
 interface VehicleRow {
   id: number; turbo_id: number; make: string; model: string; year: number | null;
   price_azn: number | null; odometer: number | null; city: string | null;
@@ -34,6 +34,7 @@ const fmtAzn = (v: number | null | undefined) => (v != null ? `${Math.round(v).t
 const colsMakeModel: ColumnDef<MakeModelRow, unknown>[] = [
   { accessorKey: "make", header: AZ.cols.make },
   { accessorKey: "model", header: AZ.cols.model },
+  { accessorKey: "year", header: AZ.cols.year, cell: ({ getValue }) => (getValue() as number | null) ?? "—" },
   { accessorKey: "avg_dts", header: AZ.cols.avgDts, cell: ({ getValue }) => fmtDays(getValue() as number) },
   { accessorKey: "median_dts", header: AZ.cols.medianDts, cell: ({ getValue }) => fmtDays(getValue() as number) },
   { accessorKey: "count", header: AZ.cols.count },
@@ -184,7 +185,7 @@ export default function DaysToSellDashboard() {
           columns={colsAgeing}
           data={ageingData?.items ?? []}
           loading={!ageingData}
-          rowHref={(r) => r.url}
+          rowHref={(r) => `/vehicles/${r.turbo_id}`}
         />
       </div>
 
@@ -199,7 +200,7 @@ export default function DaysToSellDashboard() {
           columns={colsVehicle}
           data={fastSales?.items ?? []}
           loading={!fastSales}
-          rowHref={(r) => r.url}
+          rowHref={(r) => `/vehicles/${r.turbo_id}`}
         />
       </div>
     </div>

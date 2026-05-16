@@ -20,6 +20,8 @@ export interface AnalyticsFilters {
   odometer_max?: string;
   color?: string;
   market_for?: string;
+  is_new?: string;       // "true" | "false"
+  is_on_order?: string;  // "true" | "false"
   // Market
   city?: string;
   price_min?: string;
@@ -31,6 +33,8 @@ export interface AnalyticsFilters {
   status?: string;
   date_from?: string;
   date_to?: string;
+  date_sold_from?: string;
+  date_sold_to?: string;
   features?: string; // comma-separated IDs
 }
 
@@ -38,8 +42,10 @@ const FILTER_KEYS: Array<keyof AnalyticsFilters> = [
   "make", "model", "year_min", "year_max", "condition", "body_type",
   "fuel_type", "transmission", "drive_type", "engine_min", "engine_max",
   "hp_min", "hp_max", "odometer_min", "odometer_max", "color", "market_for",
+  "is_new", "is_on_order",
   "city", "price_min", "price_max", "currency", "credit", "barter",
-  "seller_type", "status", "date_from", "date_to", "features",
+  "seller_type", "status", "date_from", "date_to", "date_sold_from", "date_sold_to",
+  "features",
 ];
 
 export function useAnalyticsFilters() {

@@ -47,6 +47,9 @@ class Vehicle(Base):
     last_scraped_view_count: Mapped[Optional[int]] = mapped_column(Integer)
 
     is_on_order: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_new: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    is_credit: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    is_barter: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     url: Mapped[str] = mapped_column(Text, nullable=False)
 
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active", index=True)

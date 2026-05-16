@@ -336,6 +336,12 @@ def update_vehicle_detail(
             fields["date_updated_turbo"] = detail["date_updated_turbo"]
         if detail.get("is_on_order") is not None:
             fields["is_on_order"] = bool(detail.get("is_on_order"))
+        if detail.get("is_new") is not None:
+            fields["is_new"] = bool(detail.get("is_new"))
+        if detail.get("is_credit") is not None:
+            fields["is_credit"] = bool(detail.get("is_credit"))
+        if detail.get("is_barter") is not None:
+            fields["is_barter"] = bool(detail.get("is_barter"))
 
         # On-order listings: listing cards had no price/odometer, so the
         # detail page is where they first land.

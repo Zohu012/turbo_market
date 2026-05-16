@@ -147,12 +147,35 @@ export interface ScrapeJob {
 
 // ── API calls ────────────────────────────────────────────────────────────────
 
+export interface VehicleKpis {
+  avg_price: number | null;
+  median_price: number | null;
+  min_price: number | null;
+  max_price: number | null;
+  avg_dts: number | null;
+  median_dts: number | null;
+  min_dts: number | null;
+  max_dts: number | null;
+  sales_7d: number;
+  sales_30d: number;
+  total_active: number;
+  total_sold: number;
+}
+
+export interface FeatureOption {
+  id: number;
+  name: string;
+}
+
 export const vehiclesApi = {
   list: (params: Record<string, unknown>) =>
     api.get<PagedResponse<Vehicle>>("/vehicles", { params }),
   get: (turboId: number) => api.get<Vehicle>(`/vehicles/${turboId}`),
   makes: () => api.get<{ makes: string[] }>("/vehicles/makes"),
   models: (make: string) => api.get<{ models: string[] }>("/vehicles/models", { params: { make } }),
+  kpis: (params: Record<string, unknown>) =>
+    api.get<VehicleKpis>("/vehicles/kpis", { params }),
+  features: () => api.get<FeatureOption[]>("/vehicles/features"),
 };
 
 export const analyticsApi = {

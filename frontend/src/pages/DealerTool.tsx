@@ -1,26 +1,56 @@
 import { useEffect, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
-import { vehiclesApi, type Vehicle, type PagedResponse } from "../api/client";
+import { vehiclesApi, type Vehicle, type PagedResponse, type VehicleKpis } from "../api/client";
 import FilterBar, { defaultFilters, type Filters } from "../components/FilterBar";
 
-const fmt = (n: number | null, currency?: string | null) =>
-  n == null ? "—" : `${n.toLocaleString()} ${currency ?? "AZN"}`;
+const fmt = (n: number | null | undefined, currency?: string | null) =>
+  n == null ? "—" : `${Math.round(n).toLocaleString()} ${currency ?? "AZN"}`;
+
+const fmtDays = (n: number | null | undefined) =>
+  n == null ? "—" : `${n} gün`;
+
+function KpiCard({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="bg-white rounded-lg border px-3 py-2">
+      <div className="text-xs text-gray-500 truncate">{label}</div>
+      <div className="text-base font-semibold text-gray-800 mt-0.5 truncate">{value}</div>
+    </div>
+  );
+}
+
+function filtersToParams(f: Filters): Record<string, unknown> {
+  const params: Record<string, unknown> = {};
+  const keys = Object.keys(f) as (keyof Filters)[];
+  for (const k of keys) {
+    if (f[k] !== "" && f[k] !== undefined) {
+      // split sort_by / sort_dir from the compound key
+      if (k === "sort_by" || k === "sort_dir") {
+        params[k] = f[k];
+      } else {
+        params[k] = f[k];
+      }
+    }
+  }
+  return params;
+}
 
 export default function DealerTool() {
   const [filters, setFilters] = useState<Filters>(defaultFilters);
   const [data, setData] = useState<PagedResponse<Vehicle> | null>(null);
+  const [kpis, setKpis] = useState<VehicleKpis | null>(null);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(async (f: Filters, p: number) => {
     setLoading(true);
     try {
-      const params: Record<string, unknown> = { page: p, page_size: 50 };
-      (Object.keys(f) as (keyof Filters)[]).forEach((k) => {
-        if (f[k]) params[k] = f[k];
-      });
-      const res = await vehiclesApi.list(params);
-      setData(res.data);
+      const params = { ...filtersToParams(f), page: p, page_size: 50 };
+      const [listRes, kpisRes] = await Promise.all([
+        vehiclesApi.list(params),
+        vehiclesApi.kpis(filtersToParams(f)),
+      ]);
+      setData(listRes.data);
+      setKpis(kpisRes.data);
     } finally {
       setLoading(false);
     }
@@ -33,12 +63,28 @@ export default function DealerTool() {
 
   useEffect(() => {
     load(filters, page);
-  }, [page]);// eslint-disable-line
+  }, [page]); // eslint-disable-line
 
   return (
     <div>
       <h1 className="text-2xl font-bold mb-4">Vehicle Inventory</h1>
       <FilterBar filters={filters} onChange={(f) => { setFilters(f); setPage(1); }} />
+
+      {/* KPIs */}
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2 mb-4">
+        <KpiCard label="Ort. qiymət" value={fmt(kpis?.avg_price)} />
+        <KpiCard label="Median qiymət" value={fmt(kpis?.median_price)} />
+        <KpiCard label="Min qiymət" value={fmt(kpis?.min_price)} />
+        <KpiCard label="Max qiymət" value={fmt(kpis?.max_price)} />
+        <KpiCard label="Ort. satış müddəti" value={fmtDays(kpis?.avg_dts)} />
+        <KpiCard label="Median satış müddəti" value={fmtDays(kpis?.median_dts)} />
+        <KpiCard label="Min satış müddəti" value={fmtDays(kpis?.min_dts)} />
+        <KpiCard label="Max satış müddəti" value={fmtDays(kpis?.max_dts)} />
+        <KpiCard label="Satış (7 gün)" value={kpis?.sales_7d?.toLocaleString() ?? "—"} />
+        <KpiCard label="Satış (30 gün)" value={kpis?.sales_30d?.toLocaleString() ?? "—"} />
+        <KpiCard label="Aktiv elanlar" value={kpis?.total_active?.toLocaleString() ?? "—"} />
+        <KpiCard label="Satılmış elanlar" value={kpis?.total_sold?.toLocaleString() ?? "—"} />
+      </div>
 
       {/* Results summary */}
       <div className="flex items-center justify-between mb-3 text-sm text-gray-500">

@@ -119,12 +119,13 @@ async def dts_by_make_model(
             select(
                 Vehicle.make.label("make"),
                 Vehicle.model.label("model"),
+                Vehicle.year.label("year"),
                 func.avg(Vehicle.days_to_sell).label("avg_dts"),
                 percentile(Vehicle.days_to_sell, 0.5).label("median_dts"),
                 func.count().label("count"),
             ),
             _dts_filters(filters),
-        ).where(Vehicle.days_to_sell.isnot(None)).group_by(Vehicle.make, Vehicle.model)
+        ).where(Vehicle.days_to_sell.isnot(None)).group_by(Vehicle.make, Vehicle.model, Vehicle.year)
         stmt = stmt.having(func.count() >= min_count)
         order_col = func.avg(Vehicle.days_to_sell).asc() if order == "fastest" else func.avg(Vehicle.days_to_sell).desc()
         stmt = stmt.order_by(order_col).limit(limit)
@@ -133,6 +134,7 @@ async def dts_by_make_model(
             {
                 "make": r.make,
                 "model": r.model,
+                "year": r.year,
                 "avg_dts": safe_round(r.avg_dts, 1),
                 "median_dts": safe_round(r.median_dts, 1),
                 "count": r.count,

@@ -344,6 +344,34 @@ def scrape_detail(page: Page, url: str) -> dict:
         if is_on_order:
             _fill_on_order_pricing(page, data)
 
+        # ── is_new / is_credit / is_barter flags ────────────────────────────────
+        try:
+            # "Yeni" badge shown on brand-new (never-registered) vehicles
+            data["is_new"] = page.query_selector(
+                ".product-new-label, .product-badge--new, "
+                "[class*='product'][class*='new'], .product-info__new"
+            ) is not None
+        except Exception:
+            data["is_new"] = None
+
+        try:
+            # "Kredit mövcuddur" — credit payment option offered by seller
+            data["is_credit"] = page.query_selector(
+                ".product-shop__credit, .credit-badge, "
+                "[class*='product'][class*='credit'], .product-extras__credit"
+            ) is not None
+        except Exception:
+            data["is_credit"] = None
+
+        try:
+            # "Barter mümkündür" — seller accepts barter
+            data["is_barter"] = page.query_selector(
+                ".product-shop__barter, .barter-badge, "
+                "[class*='product'][class*='barter'], .product-extras__barter"
+            ) is not None
+        except Exception:
+            data["is_barter"] = None
+
         try:
             seller_data = _parse_seller(page)
             data["seller"] = seller_data
@@ -362,6 +390,9 @@ def scrape_detail(page: Page, url: str) -> dict:
         "features": data.get("features", []),
         "labels": data.get("labels", []),
         "is_on_order": is_on_order,
+        "is_new": data.get("is_new"),
+        "is_credit": data.get("is_credit"),
+        "is_barter": data.get("is_barter"),
     }
 
     return data
