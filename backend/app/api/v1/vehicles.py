@@ -127,7 +127,7 @@ async def vehicle_kpis(
     from app.models.vehicle import VehicleFeature
     from sqlalchemy import exists, Numeric, cast
     from datetime import time
-    from app.services.analytics_helpers import percentile, safe_round
+    from app.services.analytics_helpers import days_on_market_expr, percentile, safe_round
 
     now = datetime.now(timezone.utc)
     d7 = now - timedelta(days=7)
@@ -245,10 +245,10 @@ async def vehicle_kpis(
             percentile(Vehicle.price_azn, 0.5).label("median_price"),
             func.min(Vehicle.price_azn).label("min_price"),
             func.max(Vehicle.price_azn).label("max_price"),
-            func.avg(Vehicle.days_to_sell).label("avg_dts"),
-            percentile(Vehicle.days_to_sell, 0.5).label("median_dts"),
-            func.min(Vehicle.days_to_sell).label("min_dts"),
-            func.max(Vehicle.days_to_sell).label("max_dts"),
+            func.avg(days_on_market_expr(Vehicle)).label("avg_dts"),
+            percentile(days_on_market_expr(Vehicle), 0.5).label("median_dts"),
+            func.min(days_on_market_expr(Vehicle)).label("min_dts"),
+            func.max(days_on_market_expr(Vehicle)).label("max_dts"),
         ))
     )).one()
 

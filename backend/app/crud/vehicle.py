@@ -7,6 +7,7 @@ from sqlalchemy.orm import selectinload
 
 from app.models.seller import Seller
 from app.models.vehicle import Feature, Vehicle, VehicleFeature, VehicleImage
+from app.services.analytics_helpers import days_on_market_expr
 
 
 def _engine_liters_expr():
@@ -155,7 +156,10 @@ async def get_vehicles(
     # seller_type requires a join
     needs_seller_join = bool(seller_type)
 
-    sort_col = getattr(Vehicle, sort_by, Vehicle.date_added)
+    if sort_by == "days_to_sell":
+        sort_col = days_on_market_expr(Vehicle)
+    else:
+        sort_col = getattr(Vehicle, sort_by, Vehicle.date_added)
     order = sort_col.desc() if sort_dir == "desc" else sort_col.asc()
 
     base_q = select(Vehicle)

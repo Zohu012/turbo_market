@@ -1,7 +1,8 @@
 """
 Dashboard 3 — Days-to-Sell.
 
-All endpoints operate on inactive vehicles with `days_to_sell IS NOT NULL`.
+All endpoints operate on inactive vehicles (status=inactive, date_deactivated IS NOT NULL).
+Days-to-sell is computed as FLOOR((date_deactivated - date_added) / 86400 seconds).
 """
 from __future__ import annotations
 
@@ -17,15 +18,18 @@ from app.models.vehicle import Vehicle
 from app.schemas.analytics_filters import AnalyticsFilters
 from app.services.analytics_cache import cache_aggregate
 from app.services.analytics_filters import apply_filters
-from app.services.analytics_helpers import percentile, safe_round, width_bucket
+from app.services.analytics_helpers import days_on_market_expr, percentile, safe_round, width_bucket
 
 
 router = APIRouter(prefix="/dts", tags=["analytics-dts"])
 
+# Shorthand — evaluated lazily inside each function so func.now() resolves at query time.
+def _dts() -> object:
+    return days_on_market_expr(Vehicle)
+
 
 def _dts_filters(filters: AnalyticsFilters) -> AnalyticsFilters:
-    """Force status=inactive; the per-row 'days_to_sell IS NOT NULL' guard is
-    added directly to each statement below."""
+    """Force status=inactive."""
     return filters.model_copy(update={"status": "inactive"})
 
 
@@ -36,19 +40,20 @@ async def dts_kpis(
 ):
     async def compute():
         f = _dts_filters(filters)
+        dts = _dts()
 
         stmt = apply_filters(
             select(
-                func.avg(Vehicle.days_to_sell).label("avg_dts"),
-                percentile(Vehicle.days_to_sell, 0.5).label("median_dts"),
-                percentile(Vehicle.days_to_sell, 0.25).label("p25"),
-                percentile(Vehicle.days_to_sell, 0.75).label("p75"),
-                func.count().filter(Vehicle.days_to_sell <= 7).label("under_7d"),
-                func.count().filter(Vehicle.days_to_sell <= 30).label("under_30d"),
+                func.avg(dts).label("avg_dts"),
+                percentile(dts, 0.5).label("median_dts"),
+                percentile(dts, 0.25).label("p25"),
+                percentile(dts, 0.75).label("p75"),
+                func.count().filter(dts <= 7).label("under_7d"),
+                func.count().filter(dts <= 30).label("under_30d"),
                 func.count().label("total"),
             ),
             f,
-        ).where(Vehicle.days_to_sell.isnot(None))
+        ).where(Vehicle.date_deactivated.isnot(None))
         row = (await db.execute(stmt)).one()
         total = row.total or 0
         p75 = float(row.p75) if row.p75 is not None else None
@@ -84,11 +89,12 @@ async def dts_distribution(
     db: AsyncSession = Depends(get_db),
 ):
     async def compute():
-        bucket = width_bucket(Vehicle.days_to_sell, 0, max_days, n_buckets).label("bucket")
+        dts = _dts()
+        bucket = width_bucket(dts, 0, max_days, n_buckets).label("bucket")
         stmt = apply_filters(
             select(bucket, func.count().label("count")),
             _dts_filters(filters),
-        ).where(Vehicle.days_to_sell.isnot(None)).group_by(bucket).order_by(bucket)
+        ).where(Vehicle.date_deactivated.isnot(None)).group_by(bucket).order_by(bucket)
         rows = (await db.execute(stmt)).all()
         bucket_size = max_days / n_buckets
         return [
@@ -115,19 +121,20 @@ async def dts_by_make_model(
     db: AsyncSession = Depends(get_db),
 ):
     async def compute():
+        dts = _dts()
         stmt = apply_filters(
             select(
                 Vehicle.make.label("make"),
                 Vehicle.model.label("model"),
                 Vehicle.year.label("year"),
-                func.avg(Vehicle.days_to_sell).label("avg_dts"),
-                percentile(Vehicle.days_to_sell, 0.5).label("median_dts"),
+                func.avg(dts).label("avg_dts"),
+                percentile(dts, 0.5).label("median_dts"),
                 func.count().label("count"),
             ),
             _dts_filters(filters),
-        ).where(Vehicle.days_to_sell.isnot(None)).group_by(Vehicle.make, Vehicle.model, Vehicle.year)
+        ).where(Vehicle.date_deactivated.isnot(None)).group_by(Vehicle.make, Vehicle.model, Vehicle.year)
         stmt = stmt.having(func.count() >= min_count)
-        order_col = func.avg(Vehicle.days_to_sell).asc() if order == "fastest" else func.avg(Vehicle.days_to_sell).desc()
+        order_col = func.avg(dts).asc() if order == "fastest" else func.avg(dts).desc()
         stmt = stmt.order_by(order_col).limit(limit)
         rows = (await db.execute(stmt)).all()
         return [
@@ -153,15 +160,16 @@ async def dts_by_year(
     db: AsyncSession = Depends(get_db),
 ):
     async def compute():
+        dts = _dts()
         stmt = apply_filters(
             select(
                 Vehicle.year.label("year"),
-                func.avg(Vehicle.days_to_sell).label("avg_dts"),
-                percentile(Vehicle.days_to_sell, 0.5).label("median_dts"),
+                func.avg(dts).label("avg_dts"),
+                percentile(dts, 0.5).label("median_dts"),
                 func.count().label("count"),
             ),
             _dts_filters(filters),
-        ).where(Vehicle.year.isnot(None), Vehicle.days_to_sell.isnot(None)).group_by(Vehicle.year).order_by(Vehicle.year)
+        ).where(Vehicle.year.isnot(None), Vehicle.date_deactivated.isnot(None)).group_by(Vehicle.year).order_by(Vehicle.year)
         rows = (await db.execute(stmt)).all()
         return [
             {
@@ -205,16 +213,17 @@ async def dts_by_price_band(
     db: AsyncSession = Depends(get_db),
 ):
     async def compute():
+        dts = _dts()
         band = _price_band_expr().label("band")
         stmt = apply_filters(
             select(
                 band,
-                func.avg(Vehicle.days_to_sell).label("avg_dts"),
-                percentile(Vehicle.days_to_sell, 0.5).label("median_dts"),
+                func.avg(dts).label("avg_dts"),
+                percentile(dts, 0.5).label("median_dts"),
                 func.count().label("count"),
             ),
             _dts_filters(filters),
-        ).where(Vehicle.price_azn.isnot(None), Vehicle.days_to_sell.isnot(None)).group_by(band)
+        ).where(Vehicle.price_azn.isnot(None), Vehicle.date_deactivated.isnot(None)).group_by(band)
         rows = (await db.execute(stmt)).all()
         order = ["<5k", "5–10k", "10–20k", "20–35k", "35–60k", "60–100k", "100k+"]
         rows_list = sorted(
@@ -233,15 +242,16 @@ async def dts_by_city(
     db: AsyncSession = Depends(get_db),
 ):
     async def compute():
+        dts = _dts()
         stmt = apply_filters(
             select(
                 Vehicle.city.label("city"),
-                func.avg(Vehicle.days_to_sell).label("avg_dts"),
-                percentile(Vehicle.days_to_sell, 0.5).label("median_dts"),
+                func.avg(dts).label("avg_dts"),
+                percentile(dts, 0.5).label("median_dts"),
                 func.count().label("count"),
             ),
             _dts_filters(filters),
-        ).where(Vehicle.city.isnot(None), Vehicle.days_to_sell.isnot(None)).group_by(Vehicle.city).order_by(func.count().desc()).limit(limit)
+        ).where(Vehicle.city.isnot(None), Vehicle.date_deactivated.isnot(None)).group_by(Vehicle.city).order_by(func.count().desc()).limit(limit)
         rows = (await db.execute(stmt)).all()
         return [
             {"city": r.city, "avg_dts": safe_round(r.avg_dts, 1), "median_dts": safe_round(r.median_dts, 1), "count": r.count}
@@ -257,16 +267,17 @@ async def dts_by_seller_type(
     db: AsyncSession = Depends(get_db),
 ):
     async def compute():
+        dts = _dts()
         stmt = apply_filters(
             select(
                 Seller.seller_type.label("seller_type"),
-                func.avg(Vehicle.days_to_sell).label("avg_dts"),
-                percentile(Vehicle.days_to_sell, 0.5).label("median_dts"),
+                func.avg(dts).label("avg_dts"),
+                percentile(dts, 0.5).label("median_dts"),
                 func.count().label("count"),
             ),
             _dts_filters(filters),
             join_seller=True,
-        ).where(Vehicle.days_to_sell.isnot(None)).group_by(Seller.seller_type)
+        ).where(Vehicle.date_deactivated.isnot(None)).group_by(Seller.seller_type)
         rows = (await db.execute(stmt)).all()
         return [
             {
@@ -287,16 +298,17 @@ async def dts_by_mileage_band(
     db: AsyncSession = Depends(get_db),
 ):
     async def compute():
+        dts = _dts()
         band = _mileage_band_expr().label("band")
         stmt = apply_filters(
             select(
                 band,
-                func.avg(Vehicle.days_to_sell).label("avg_dts"),
-                percentile(Vehicle.days_to_sell, 0.5).label("median_dts"),
+                func.avg(dts).label("avg_dts"),
+                percentile(dts, 0.5).label("median_dts"),
                 func.count().label("count"),
             ),
             _dts_filters(filters),
-        ).where(Vehicle.odometer.isnot(None), Vehicle.days_to_sell.isnot(None)).group_by(band)
+        ).where(Vehicle.odometer.isnot(None), Vehicle.date_deactivated.isnot(None)).group_by(band)
         rows = (await db.execute(stmt)).all()
         order = ["<50k", "50–100k", "100–150k", "150–200k", "200–300k", "300k+"]
         return sorted(
@@ -313,15 +325,16 @@ async def dts_by_body_type(
     db: AsyncSession = Depends(get_db),
 ):
     async def compute():
+        dts = _dts()
         stmt = apply_filters(
             select(
                 Vehicle.body_type.label("body_type"),
-                func.avg(Vehicle.days_to_sell).label("avg_dts"),
-                percentile(Vehicle.days_to_sell, 0.5).label("median_dts"),
+                func.avg(dts).label("avg_dts"),
+                percentile(dts, 0.5).label("median_dts"),
                 func.count().label("count"),
             ),
             _dts_filters(filters),
-        ).where(Vehicle.body_type.isnot(None), Vehicle.days_to_sell.isnot(None)).group_by(Vehicle.body_type).order_by(func.count().desc())
+        ).where(Vehicle.body_type.isnot(None), Vehicle.date_deactivated.isnot(None)).group_by(Vehicle.body_type).order_by(func.count().desc())
         rows = (await db.execute(stmt)).all()
         return [
             {
@@ -347,9 +360,9 @@ async def active_too_long(
 
     p75 = await db.scalar(
         apply_filters(
-            select(percentile(Vehicle.days_to_sell, 0.75)),
+            select(percentile(_dts(), 0.75)),
             _dts_filters(filters),
-        ).where(Vehicle.days_to_sell.isnot(None))
+        ).where(Vehicle.date_deactivated.isnot(None))
     )
     if p75 is None:
         return {"items": [], "total": 0, "p75_days": None}
@@ -398,11 +411,12 @@ async def recent_fast_sales(
     db: AsyncSession = Depends(get_db),
 ):
     """Inactive rows deactivated in the last `days` whose DTS is ≤ P25."""
+    dts = _dts()
     p25 = await db.scalar(
         apply_filters(
-            select(percentile(Vehicle.days_to_sell, 0.25)),
+            select(percentile(dts, 0.25)),
             _dts_filters(filters),
-        ).where(Vehicle.days_to_sell.isnot(None))
+        ).where(Vehicle.date_deactivated.isnot(None))
     )
     if p25 is None:
         return {"items": [], "p25_days": None}
@@ -413,8 +427,8 @@ async def recent_fast_sales(
         _dts_filters(filters),
     ).where(
         Vehicle.date_deactivated >= since,
-        Vehicle.days_to_sell.isnot(None),
-        Vehicle.days_to_sell <= p25,
+        Vehicle.date_deactivated.isnot(None),
+        dts <= p25,
     ).limit(limit)
     rows = (await db.execute(stmt)).scalars().all()
     return {
@@ -429,7 +443,7 @@ async def recent_fast_sales(
                 "price_azn": float(v.price_azn) if v.price_azn else None,
                 "odometer": v.odometer,
                 "city": v.city,
-                "days_to_sell": v.days_to_sell,
+                "days_to_sell": (v.date_deactivated - v.date_added).days if v.date_deactivated else None,
                 "date_deactivated": v.date_deactivated.isoformat() if v.date_deactivated else None,
                 "url": v.url,
             }
