@@ -18,22 +18,37 @@ interface Seller {
 export default function SellerProfile() {
   const { id } = useParams<{ id: string }>();
   const [seller, setSeller] = useState<Seller | null>(null);
+  const [sellerError, setSellerError] = useState<string | null>(null);
+  const [sellerLoading, setSellerLoading] = useState(true);
   const [vehicles, setVehicles] = useState<PagedResponse<Vehicle> | null>(null);
   const [page, setPage] = useState(1);
   const [status, setStatus] = useState("active");
 
   useEffect(() => {
     if (!id) return;
-    sellersApi.get(Number(id)).then((r) => setSeller(r.data as Seller));
+    setSellerLoading(true);
+    setSellerError(null);
+    sellersApi
+      .get(Number(id))
+      .then((r) => setSeller(r.data as Seller))
+      .catch((err) => {
+        const status = err?.response?.status;
+        setSellerError(status === 404 ? "Satıcı tapılmadı." : "Satıcı məlumatları yüklənmədi.");
+      })
+      .finally(() => setSellerLoading(false));
   }, [id]);
 
   useEffect(() => {
     if (!id) return;
-    sellersApi.vehicles(Number(id), { status, page, page_size: 50 })
-      .then((r) => setVehicles(r.data as PagedResponse<Vehicle>));
+    sellersApi
+      .vehicles(Number(id), { status, page, page_size: 50 })
+      .then((r) => setVehicles(r.data as PagedResponse<Vehicle>))
+      .catch(() => setVehicles(null));
   }, [id, status, page]);
 
-  if (!seller) return <div className="p-8 text-center text-gray-400">Loading...</div>;
+  if (sellerLoading) return <div className="p-8 text-center text-gray-400">Yüklənir...</div>;
+  if (sellerError) return <div className="p-8 text-center text-red-400">{sellerError}</div>;
+  if (!seller) return null;
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
@@ -103,9 +118,10 @@ export default function SellerProfile() {
             {vehicles?.items.map((v) => (
               <tr key={v.id} className="hover:bg-gray-50">
                 <td className="px-3 py-2">
-                  <Link to={`/vehicles/${v.turbo_id}`} className="text-blue-600 hover:underline font-medium">
+                  <a href={`/vehicles/${v.turbo_id}`} target="_blank" rel="noopener noreferrer"
+                    className="text-blue-600 hover:underline font-medium">
                     {v.make} {v.model}
-                  </Link>
+                  </a>
                 </td>
                 <td className="px-3 py-2">{v.year ?? "—"}</td>
                 <td className="px-3 py-2 font-medium">{v.price_azn ? Math.round(v.price_azn).toLocaleString() : "—"}</td>
