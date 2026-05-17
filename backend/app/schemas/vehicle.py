@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class VehicleImageOut(BaseModel):
@@ -48,6 +48,14 @@ class VehicleSummary(BaseModel):
     primary_image: Optional[str] = None  # injected from first image
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="after")
+    def _compute_days_to_sell(self) -> "VehicleSummary":
+        if self.date_deactivated is not None:
+            self.days_to_sell = (self.date_deactivated - self.date_added).days
+        else:
+            self.days_to_sell = (datetime.now(timezone.utc) - self.date_added).days
+        return self
 
 
 class SellerBrief(BaseModel):
