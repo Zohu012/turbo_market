@@ -54,7 +54,7 @@ async def seller_vehicles(
 ):
     vehicles, total = await get_vehicles(
         db, page=page, page_size=page_size,
-        seller_id=seller_id, status=status or "active",
+        seller_id=seller_id, status=status or None,
     )
     items = []
     for v in vehicles:

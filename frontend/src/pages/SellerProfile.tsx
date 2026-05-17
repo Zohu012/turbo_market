@@ -22,7 +22,7 @@ export default function SellerProfile() {
   const [sellerLoading, setSellerLoading] = useState(true);
   const [vehicles, setVehicles] = useState<PagedResponse<Vehicle> | null>(null);
   const [page, setPage] = useState(1);
-  const [status, setStatus] = useState("active");
+  const [status, setStatus] = useState("");
 
   useEffect(() => {
     if (!id) return;
@@ -99,8 +99,9 @@ export default function SellerProfile() {
           onChange={(e) => { setStatus(e.target.value); setPage(1); }}
           className="border rounded px-2 py-1.5 text-sm"
         >
-          <option value="active">Active</option>
-          <option value="inactive">Sold / Inactive</option>
+          <option value="">Hamısı</option>
+          <option value="active">Aktiv</option>
+          <option value="inactive">Satılmış / Deaktiv</option>
         </select>
         <span className="text-sm text-gray-500">{vehicles?.total.toLocaleString()} vehicles</span>
       </div>
