@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class SellerOut(BaseModel):
@@ -18,6 +18,13 @@ class SellerOut(BaseModel):
     phones: list[str] = []
 
     model_config = {"from_attributes": True}
+
+    @field_validator("phones", mode="before")
+    @classmethod
+    def _coerce_phones(cls, v):
+        if not v:
+            return []
+        return [p.phone if hasattr(p, "phone") else str(p) for p in v]
 
 
 class SellerListResponse(BaseModel):

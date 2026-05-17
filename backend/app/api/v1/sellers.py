@@ -28,11 +28,7 @@ async def list_sellers(
         seller_type=seller_type, city=city,
         sort_by=sort_by, sort_dir=sort_dir,
     )
-    items = []
-    for s in sellers:
-        out = SellerOut.model_validate(s)
-        out.phones = [p.phone for p in s.phones]
-        items.append(out)
+    items = [SellerOut.model_validate(s) for s in sellers]
 
     return SellerListResponse(
         items=items, total=total, page=page,
@@ -45,9 +41,7 @@ async def get_seller_detail(seller_id: int, db: AsyncSession = Depends(get_db)):
     seller = await get_seller(db, seller_id)
     if not seller:
         raise HTTPException(status_code=404, detail="Seller not found")
-    out = SellerOut.model_validate(seller)
-    out.phones = [p.phone for p in seller.phones]
-    return out
+    return SellerOut.model_validate(seller)
 
 
 @router.get("/{seller_id}/vehicles", response_model=VehicleListResponse)
