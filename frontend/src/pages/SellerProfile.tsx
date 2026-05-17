@@ -23,6 +23,8 @@ export default function SellerProfile() {
   const [vehicles, setVehicles] = useState<PagedResponse<Vehicle> | null>(null);
   const [page, setPage] = useState(1);
   const [status, setStatus] = useState("");
+  const [sortBy, setSortBy] = useState("date_added");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
   useEffect(() => {
     if (!id) return;
@@ -41,10 +43,38 @@ export default function SellerProfile() {
   useEffect(() => {
     if (!id) return;
     sellersApi
-      .vehicles(Number(id), { status, page, page_size: 50 })
+      .vehicles(Number(id), { status, page, page_size: 50, sort_by: sortBy, sort_dir: sortDir })
       .then((r) => setVehicles(r.data as PagedResponse<Vehicle>))
       .catch(() => setVehicles(null));
-  }, [id, status, page]);
+  }, [id, status, page, sortBy, sortDir]);
+
+  const toggleSort = (col: string) => {
+    if (sortBy === col) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortBy(col);
+      setSortDir("desc");
+    }
+    setPage(1);
+  };
+
+  const Th = ({ children }: { children: React.ReactNode }) => (
+    <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">
+      {children}
+    </th>
+  );
+
+  const SortTh = ({ col, label }: { col: string; label: string }) => (
+    <th
+      className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap cursor-pointer select-none hover:bg-gray-100"
+      onClick={() => toggleSort(col)}
+    >
+      {label}{" "}
+      {sortBy === col
+        ? (sortDir === "asc" ? "↑" : "↓")
+        : <span className="text-gray-300">↕</span>}
+    </th>
+  );
 
   if (sellerLoading) return <div className="p-8 text-center text-gray-400">Yüklənir...</div>;
   if (sellerError) return <div className="p-8 text-center text-red-400">{sellerError}</div>;
@@ -106,13 +136,17 @@ export default function SellerProfile() {
         <span className="text-sm text-gray-500">{vehicles?.total.toLocaleString()} vehicles</span>
       </div>
 
-      <div className="bg-white rounded-lg border overflow-hidden">
+      <div className="bg-white rounded-lg border overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="bg-gray-50 border-b">
             <tr>
-              {["Make / Model", "Year", "Price (AZN)", "Odometer", "Status", "Added", "Days to sell"].map((h) => (
-                <th key={h} className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">{h}</th>
-              ))}
+              <Th>Make / Model</Th>
+              <SortTh col="year" label="Year" />
+              <SortTh col="price_azn" label="Price (AZN)" />
+              <SortTh col="odometer" label="Odometer" />
+              <Th>Status</Th>
+              <SortTh col="date_added" label="Added" />
+              <SortTh col="days_to_sell" label="Days to sell" />
             </tr>
           </thead>
           <tbody className="divide-y">
