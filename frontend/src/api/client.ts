@@ -176,6 +176,11 @@ export const vehiclesApi = {
   kpis: (params: Record<string, unknown>) =>
     api.get<VehicleKpis>("/vehicles/kpis", { params }),
   features: () => api.get<FeatureOption[]>("/vehicles/features"),
+  years: () => api.get<number[]>("/vehicles/years"),
+  colors: () => api.get<string[]>("/vehicles/colors"),
+  conditions: () => api.get<string[]>("/vehicles/conditions"),
+  marketOptions: () => api.get<string[]>("/vehicles/market-options"),
+  engineOptions: () => api.get<string[]>("/vehicles/engine-options"),
 };
 
 export const analyticsApi = {

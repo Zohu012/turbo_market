@@ -88,8 +88,19 @@ export default function FilterBar({ filters, setFilters, resetFilters }: Props) 
   const [featureSearch, setFeatureSearch] = useState("");
   const [openSection, setOpenSection] = useState<string | null>("vehicle");
 
+  const [years, setYears] = useState<string[]>([]);
+  const [colors, setColors] = useState<string[]>([]);
+  const [conditions, setConditions] = useState<string[]>([]);
+  const [marketOptions, setMarketOptions] = useState<string[]>([]);
+  const [engineOptions, setEngineOptions] = useState<string[]>([]);
+
   useEffect(() => {
     vehiclesApi.features().then((r) => setFeatureOptions(r.data)).catch(() => {});
+    vehiclesApi.years().then((r) => setYears(r.data.map(String))).catch(() => {});
+    vehiclesApi.colors().then((r) => setColors(r.data)).catch(() => {});
+    vehiclesApi.conditions().then((r) => setConditions(r.data)).catch(() => {});
+    vehiclesApi.marketOptions().then((r) => setMarketOptions(r.data)).catch(() => {});
+    vehiclesApi.engineOptions().then((r) => setEngineOptions(r.data)).catch(() => {});
   }, []);
 
   const set = (key: keyof Filters) => (value: string) =>
@@ -120,6 +131,19 @@ export default function FilterBar({ filters, setFilters, resetFilters }: Props) 
       onChange={(e) => set(key)(e.target.value)}
       className="border rounded px-2 py-1.5 text-sm w-full"
     />
+  );
+
+  // Date input with a persistent label above it
+  const dateInp = (key: keyof Filters, label: string) => (
+    <div className="flex flex-col gap-0.5">
+      <span className="text-xs text-gray-500 leading-none">{label}</span>
+      <input
+        type="date"
+        value={filters[key]}
+        onChange={(e) => set(key)(e.target.value)}
+        className="border rounded px-2 py-1.5 text-sm w-full"
+      />
+    </div>
   );
 
   const selectedFeatureIds = filters.features
@@ -168,18 +192,53 @@ export default function FilterBar({ filters, setFilters, resetFilters }: Props) 
               placeholder="Bütün modellər"
               options={models.map((m) => ({ value: m, label: m }))}
             />
-            {inp("year_min", "İl (min)", "number")}
-            {inp("year_max", "İl (max)", "number")}
+            <SearchableSelect
+              value={filters.year_min}
+              onChange={(v) => setFilters({ year_min: v || undefined }, true)}
+              placeholder="İl (min)"
+              options={years.map((y) => ({ value: y, label: y }))}
+            />
+            <SearchableSelect
+              value={filters.year_max}
+              onChange={(v) => setFilters({ year_max: v || undefined }, true)}
+              placeholder="İl (max)"
+              options={years.map((y) => ({ value: y, label: y }))}
+            />
             {sel("body_type", BODY_TYPES, "Ban növü")}
             {sel("fuel_type", FUEL_TYPES, "Yanacaq")}
             {sel("transmission", TRANSMISSIONS, "Sürətlər qutusu")}
-            {inp("engine_min", "Həcm min (L)", "number")}
-            {inp("engine_max", "Həcm max (L)", "number")}
+            <SearchableSelect
+              value={filters.engine_min}
+              onChange={(v) => setFilters({ engine_min: v || undefined }, true)}
+              placeholder="Həcm min (sm³)"
+              options={engineOptions.map((e) => ({ value: e, label: `${e} sm³` }))}
+            />
+            <SearchableSelect
+              value={filters.engine_max}
+              onChange={(v) => setFilters({ engine_max: v || undefined }, true)}
+              placeholder="Həcm max (sm³)"
+              options={engineOptions.map((e) => ({ value: e, label: `${e} sm³` }))}
+            />
             {inp("hp_min", "Güc min (HP)", "number")}
             {inp("hp_max", "Güc max (HP)", "number")}
-            {inp("color", "Rəng")}
-            {inp("condition", "Vəziyyət")}
-            {inp("market_for", "Bazar")}
+            <SearchableSelect
+              value={filters.color}
+              onChange={(v) => setFilters({ color: v || undefined }, true)}
+              placeholder="Rəng"
+              options={colors.map((c) => ({ value: c, label: c }))}
+            />
+            <SearchableSelect
+              value={filters.condition}
+              onChange={(v) => setFilters({ condition: v || undefined }, true)}
+              placeholder="Vəziyyət"
+              options={conditions.map((c) => ({ value: c, label: c }))}
+            />
+            <SearchableSelect
+              value={filters.market_for}
+              onChange={(v) => setFilters({ market_for: v || undefined }, true)}
+              placeholder="Bazar"
+              options={marketOptions.map((m) => ({ value: m, label: m }))}
+            />
             {sel("is_new", BOOL_OPTS, "Yeni avtomobil")}
           </div>
         )}
@@ -208,10 +267,10 @@ export default function FilterBar({ filters, setFilters, resetFilters }: Props) 
         <SectionHeader id="dates" title="Tarixlər və Status" />
         {openSection === "dates" && (
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-2">
-            {inp("date_added_from", "Əlavə tarixi (başlanğıc)", "date")}
-            {inp("date_added_to", "Əlavə tarixi (son)", "date")}
-            {inp("date_sold_from", "Satış tarixi (başlanğıc)", "date")}
-            {inp("date_sold_to", "Satış tarixi (son)", "date")}
+            {dateInp("date_added_from", "Əlavə tarixi (başlanğıc)")}
+            {dateInp("date_added_to", "Əlavə tarixi (son)")}
+            {dateInp("date_sold_from", "Satış tarixi (başlanğıc)")}
+            {dateInp("date_sold_to", "Satış tarixi (son)")}
             {inp("days_to_sell_min", "Satış günü (min)", "number")}
             {inp("days_to_sell_max", "Satış günü (max)", "number")}
             {sel("status", [{ value: "active", label: "Aktiv" }, { value: "inactive", label: "Deaktiv" }], "Status")}

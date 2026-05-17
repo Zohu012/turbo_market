@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -36,8 +36,8 @@ def _vehicle_filter_params(
     city: Optional[str] = None,
     seller_id: Optional[int] = None,
     status: str = "active",
-    engine_min: Optional[float] = Query(None, ge=0, le=20),
-    engine_max: Optional[float] = Query(None, ge=0, le=20),
+    engine_min: Optional[int] = Query(None, ge=0, le=10000),
+    engine_max: Optional[int] = Query(None, ge=0, le=10000),
     hp_min: Optional[int] = Query(None, ge=0, le=2000),
     hp_max: Optional[int] = Query(None, ge=0, le=2000),
     seller_type: Optional[str] = Query(None, pattern="^(business|dealer|private)$"),
@@ -319,6 +319,81 @@ async def list_makes(db: AsyncSession = Depends(get_db)):
 @router.get("/models")
 async def list_models(make: str, db: AsyncSession = Depends(get_db)):
     return {"models": await get_models(db, make)}
+
+
+@router.get("/years")
+async def list_years(db: AsyncSession = Depends(get_db)):
+    """Distinct vehicle years sorted descending."""
+    result = await db.execute(
+        select(Vehicle.year).distinct()
+        .where(Vehicle.year.isnot(None))
+        .order_by(Vehicle.year.desc())
+    )
+    return [r[0] for r in result.all()]
+
+
+_GARBAGE_RE = r".*(null|json|undefined|N/A).*"
+
+
+@router.get("/colors")
+async def list_colors(db: AsyncSession = Depends(get_db)):
+    """Distinct color values, garbage-filtered, sorted alphabetically."""
+    result = await db.execute(
+        select(Vehicle.color).distinct()
+        .where(
+            Vehicle.color.isnot(None),
+            Vehicle.color != "",
+            ~Vehicle.color.op("~*")(_GARBAGE_RE),
+        )
+        .order_by(Vehicle.color)
+    )
+    return [r[0] for r in result.all()]
+
+
+@router.get("/conditions")
+async def list_conditions(db: AsyncSession = Depends(get_db)):
+    """Distinct condition values, garbage-filtered, sorted alphabetically."""
+    result = await db.execute(
+        select(Vehicle.condition).distinct()
+        .where(
+            Vehicle.condition.isnot(None),
+            Vehicle.condition != "",
+            ~Vehicle.condition.op("~*")(_GARBAGE_RE),
+        )
+        .order_by(Vehicle.condition)
+    )
+    return [r[0] for r in result.all()]
+
+
+@router.get("/market-options")
+async def list_market_options(db: AsyncSession = Depends(get_db)):
+    """Distinct market_for values, garbage-filtered, sorted alphabetically."""
+    result = await db.execute(
+        select(Vehicle.market_for).distinct()
+        .where(
+            Vehicle.market_for.isnot(None),
+            Vehicle.market_for != "",
+            ~Vehicle.market_for.op("~*")(_GARBAGE_RE),
+        )
+        .order_by(Vehicle.market_for)
+    )
+    return [r[0] for r in result.all()]
+
+
+@router.get("/engine-options")
+async def list_engine_options(db: AsyncSession = Depends(get_db)):
+    """Distinct engine CC values (numeric only) sorted ascending."""
+    from sqlalchemy import Integer
+    result = await db.execute(
+        select(Vehicle.engine).distinct()
+        .where(
+            Vehicle.engine.isnot(None),
+            Vehicle.engine != "",
+            Vehicle.engine.op("~")(r"^\d+$"),
+        )
+        .order_by(cast(Vehicle.engine, Integer))
+    )
+    return [r[0] for r in result.all()]
 
 
 @router.get("/{turbo_id}", response_model=VehicleDetail)

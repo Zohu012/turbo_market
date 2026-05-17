@@ -11,11 +11,17 @@ from app.services.analytics_helpers import days_on_market_expr
 
 
 def _engine_liters_expr():
-    """Parse leading numeric token from the engine text column (e.g. '1.5 L / ...')."""
+    """Engine column stores CC as integer string (e.g. '1500').
+    Casts it to INTEGER for range comparisons. Returns NULL for non-numeric values.
+    """
+    from sqlalchemy import Integer
     return cast(
-        (func.regexp_match(Vehicle.engine, r"([0-9]+\.?[0-9]*)"))[1],
-        Numeric(4, 2),
+        (func.regexp_match(Vehicle.engine, r"^(\d+)$"))[1],
+        Integer,
     )
+
+# Alias used by KPI endpoint import.
+_engine_cc_expr = _engine_liters_expr
 
 
 async def get_vehicles(
@@ -43,8 +49,8 @@ async def get_vehicles(
     sort_by: str = "date_added",
     sort_dir: str = "desc",
     # --- new filters ---
-    engine_min: Optional[float] = None,
-    engine_max: Optional[float] = None,
+    engine_min: Optional[int] = None,
+    engine_max: Optional[int] = None,
     hp_min: Optional[int] = None,
     hp_max: Optional[int] = None,
     seller_type: Optional[str] = None,

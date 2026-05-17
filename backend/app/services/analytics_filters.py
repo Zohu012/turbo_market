@@ -16,18 +16,20 @@ from app.models.vehicle import Vehicle, VehicleFeature
 from app.schemas.analytics_filters import AnalyticsFilters
 
 
-def _engine_liters_expr():
-    """Postgres expression: parse first numeric token from the engine text.
-
-    The `engine` column stores values like "1.5 L / 100 H/g / Benzin" on
-    turbo.az. We extract the leading volume in liters. NULL when no match.
+def _engine_cc_expr():
+    """Postgres expression: cast the engine column (stored as integer cc string,
+    e.g. '1500') to INTEGER. Returns NULL for non-numeric values (Elektro, etc.).
     Slow — only invoked when an engine_min/max filter is set.
     """
-    # regexp_match returns text[]; (..)[1]::numeric pulls the first capture.
+    from sqlalchemy import Integer
     return func.cast(
-        (func.regexp_match(Vehicle.engine, r"([0-9]+\.?[0-9]*)"))[1],
-        type_=__import__("sqlalchemy").Numeric(4, 2),
+        (func.regexp_match(Vehicle.engine, r"^(\d+)$"))[1],
+        type_=Integer,
     )
+
+
+# Keep legacy alias so any external imports don't break immediately.
+_engine_liters_expr = _engine_cc_expr
 
 
 def apply_filters(
@@ -71,7 +73,7 @@ def apply_filters(
     if filters.transmission:
         clauses.append(Vehicle.transmission == filters.transmission)
     if filters.engine_min is not None or filters.engine_max is not None:
-        liters = _engine_liters_expr()
+        liters = _engine_cc_expr()
         if filters.engine_min is not None:
             clauses.append(liters >= filters.engine_min)
         if filters.engine_max is not None:

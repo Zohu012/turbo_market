@@ -44,8 +44,8 @@ class AnalyticsFilters(BaseModel):
     fuel_type: Optional[str] = None
     transmission: Optional[str] = None
     gears: Optional[int] = None
-    engine_min: Optional[float] = None
-    engine_max: Optional[float] = None
+    engine_min: Optional[int] = None
+    engine_max: Optional[int] = None
     hp_min: Optional[int] = None
     hp_max: Optional[int] = None
     odometer_min: Optional[int] = None
@@ -85,8 +85,8 @@ class AnalyticsFilters(BaseModel):
         fuel_type: Optional[str] = Query(None),
         transmission: Optional[str] = Query(None),
         gears: Optional[int] = Query(None, ge=1, le=12),
-        engine_min: Optional[float] = Query(None, ge=0, le=20),
-        engine_max: Optional[float] = Query(None, ge=0, le=20),
+        engine_min: Optional[int] = Query(None, ge=0, le=10000),
+        engine_max: Optional[int] = Query(None, ge=0, le=10000),
         hp_min: Optional[int] = Query(None, ge=0, le=2000),
         hp_max: Optional[int] = Query(None, ge=0, le=2000),
         odometer_min: Optional[int] = Query(None, ge=0),
