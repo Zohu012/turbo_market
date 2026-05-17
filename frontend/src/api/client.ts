@@ -182,6 +182,7 @@ export const vehiclesApi = {
   conditions: () => api.get<string[]>("/vehicles/conditions"),
   marketOptions: () => api.get<string[]>("/vehicles/market-options"),
   engineOptions: () => api.get<string[]>("/vehicles/engine-options"),
+  cities: () => api.get<string[]>("/vehicles/cities"),
 };
 
 export const analyticsApi = {

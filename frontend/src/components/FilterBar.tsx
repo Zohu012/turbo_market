@@ -93,6 +93,7 @@ export default function FilterBar({ filters, setFilters, resetFilters }: Props) 
   const [conditions, setConditions] = useState<string[]>([]);
   const [marketOptions, setMarketOptions] = useState<string[]>([]);
   const [engineOptions, setEngineOptions] = useState<string[]>([]);
+  const [cityOptions, setCityOptions] = useState<string[]>([]);
 
   useEffect(() => {
     vehiclesApi.features().then((r) => setFeatureOptions(r.data)).catch(() => {});
@@ -101,6 +102,7 @@ export default function FilterBar({ filters, setFilters, resetFilters }: Props) 
     vehiclesApi.conditions().then((r) => setConditions(r.data)).catch(() => {});
     vehiclesApi.marketOptions().then((r) => setMarketOptions(r.data)).catch(() => {});
     vehiclesApi.engineOptions().then((r) => setEngineOptions(r.data)).catch(() => {});
+    vehiclesApi.cities().then((r) => setCityOptions(r.data)).catch(() => {});
   }, []);
 
   const set = (key: keyof Filters) => (value: string) =>
@@ -249,7 +251,12 @@ export default function FilterBar({ filters, setFilters, resetFilters }: Props) 
         <SectionHeader id="market" title="Bazar" />
         {openSection === "market" && (
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-2">
-            {inp("city", "Şəhər")}
+            <SearchableSelect
+              value={filters.city}
+              onChange={(v) => setFilters({ city: v || undefined }, true)}
+              placeholder="Şəhər"
+              options={cityOptions.map((c) => ({ value: c, label: c }))}
+            />
             {inp("price_min", "Qiymət min (AZN)", "number")}
             {inp("price_max", "Qiymət max (AZN)", "number")}
             {inp("odometer_min", "Yürüş min (km)", "number")}

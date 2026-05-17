@@ -75,6 +75,7 @@ export default function AnalyticsFilterForm({ filters, setFilters }: Props) {
   const [conditions, setConditions] = useState<string[]>([]);
   const [marketOptions, setMarketOptions] = useState<string[]>([]);
   const [engineOptions, setEngineOptions] = useState<string[]>([]);
+  const [cityOptions, setCityOptions] = useState<string[]>([]);
 
   useEffect(() => {
     vehiclesApi.features().then((r) => setFeatureOptions(r.data)).catch(() => {});
@@ -83,6 +84,7 @@ export default function AnalyticsFilterForm({ filters, setFilters }: Props) {
     vehiclesApi.conditions().then((r) => setConditions(r.data)).catch(() => {});
     vehiclesApi.marketOptions().then((r) => setMarketOptions(r.data)).catch(() => {});
     vehiclesApi.engineOptions().then((r) => setEngineOptions(r.data)).catch(() => {});
+    vehiclesApi.cities().then((r) => setCityOptions(r.data)).catch(() => {});
   }, []);
 
   const set = (key: keyof AnalyticsFilters) => (value: string) =>
@@ -183,7 +185,12 @@ export default function AnalyticsFilterForm({ filters, setFilters }: Props) {
           Bazar
         </div>
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-2">
-          {inp(filters.city ?? "", set("city"), AZ.filters.city)}
+          <SearchableSelect
+            value={filters.city ?? ""}
+            onChange={(v) => setFilters({ city: v || undefined }, true)}
+            placeholder={AZ.filters.city}
+            options={cityOptions.map((c) => ({ value: c, label: c }))}
+          />
           {inp(filters.price_min ?? "", set("price_min"), AZ.filters.priceFrom, "number")}
           {inp(filters.price_max ?? "", set("price_max"), AZ.filters.priceTo, "number")}
           {sel(filters.seller_type ?? "", set("seller_type"), AZ.filters.sellerType,

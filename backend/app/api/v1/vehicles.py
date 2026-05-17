@@ -380,6 +380,21 @@ async def list_market_options(db: AsyncSession = Depends(get_db)):
     return [r[0] for r in result.all()]
 
 
+@router.get("/cities")
+async def list_cities(db: AsyncSession = Depends(get_db)):
+    """Distinct city values, garbage-filtered, sorted alphabetically."""
+    result = await db.execute(
+        select(Vehicle.city).distinct()
+        .where(
+            Vehicle.city.isnot(None),
+            Vehicle.city != "",
+            ~Vehicle.city.op("~*")(_GARBAGE_RE),
+        )
+        .order_by(Vehicle.city)
+    )
+    return [r[0] for r in result.all()]
+
+
 @router.get("/engine-options")
 async def list_engine_options(db: AsyncSession = Depends(get_db)):
     """Distinct engine CC values (numeric only) sorted ascending."""
