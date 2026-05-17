@@ -184,7 +184,10 @@ async def get_vehicles(
 
     q = (
         base_q
-        .options(selectinload(Vehicle.images))
+        .options(
+            selectinload(Vehicle.images),
+            selectinload(Vehicle.seller).selectinload(Seller.phones),
+        )
         .order_by(order)
         .offset((page - 1) * page_size)
         .limit(page_size)
@@ -202,7 +205,7 @@ async def get_vehicle_by_turbo_id(db: AsyncSession, turbo_id: int) -> Optional[V
         .options(
             selectinload(Vehicle.images),
             selectinload(Vehicle.price_history),
-            selectinload(Vehicle.seller),
+            selectinload(Vehicle.seller).selectinload(Seller.phones),
         )
     )
     result = await db.execute(q)

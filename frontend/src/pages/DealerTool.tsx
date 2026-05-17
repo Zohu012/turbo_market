@@ -110,6 +110,7 @@ export default function DealerTool() {
                 <Th>Fuel</Th>
                 <Th>Gearbox</Th>
                 <Th>City</Th>
+                <Th>Satıcı</Th>
                 <Th>Status</Th>
                 <SortTh col="date_added" label="Added" />
                 <SortTh col="days_to_sell" label="Days to sell" />
@@ -117,9 +118,9 @@ export default function DealerTool() {
             </thead>
             <tbody className="divide-y">
               {loading ? (
-                <tr><td colSpan={12} className="px-4 py-8 text-center text-gray-400">Loading...</td></tr>
+                <tr><td colSpan={13} className="px-4 py-8 text-center text-gray-400">Loading...</td></tr>
               ) : data?.items.length === 0 ? (
-                <tr><td colSpan={12} className="px-4 py-8 text-center text-gray-400">No vehicles found</td></tr>
+                <tr><td colSpan={13} className="px-4 py-8 text-center text-gray-400">No vehicles found</td></tr>
               ) : (
                 data?.items.map((v) => (
                   <tr key={v.id} className="hover:bg-gray-50 transition-colors">
@@ -147,6 +148,23 @@ export default function DealerTool() {
                     <td className="px-3 py-2">{v.fuel_type ?? "—"}</td>
                     <td className="px-3 py-2">{v.transmission ?? "—"}</td>
                     <td className="px-3 py-2">{v.city ?? "—"}</td>
+                    <td className="px-3 py-2">
+                      {v.seller ? (
+                        <div className="min-w-[120px]">
+                          <a
+                            href={`/sellers/${v.seller.id}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-600 hover:underline text-xs font-medium"
+                          >
+                            {v.seller.name ?? "—"}
+                          </a>
+                          {v.seller.phones.map((p) => (
+                            <div key={p} className="text-xs text-gray-500">{p}</div>
+                          ))}
+                        </div>
+                      ) : "—"}
+                    </td>
                     <td className="px-3 py-2">
                       <span className={`text-xs px-2 py-0.5 rounded-full ${v.status === "active" ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-600"}`}>
                         {v.status}

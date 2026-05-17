@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from typing import Optional
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 
 class VehicleImageOut(BaseModel):
@@ -45,7 +45,8 @@ class VehicleSummary(BaseModel):
     date_deactivated: Optional[datetime]
     days_to_sell: Optional[int]
     url: str
-    primary_image: Optional[str] = None  # injected from first image
+    primary_image: Optional[str] = None
+    seller: Optional["SellerBrief"] = None
 
     model_config = {"from_attributes": True}
 
@@ -65,8 +66,16 @@ class SellerBrief(BaseModel):
     city: Optional[str]
     total_listings: int
     total_sold: int
+    phones: list[str] = []
 
     model_config = {"from_attributes": True}
+
+    @field_validator("phones", mode="before")
+    @classmethod
+    def _coerce_phones(cls, v):
+        if not v:
+            return []
+        return [p.phone if hasattr(p, "phone") else str(p) for p in v]
 
 
 class VehicleDetail(VehicleSummary):
@@ -78,7 +87,6 @@ class VehicleDetail(VehicleSummary):
     view_count: Optional[int]
     images: list[VehicleImageOut] = []
     price_history: list[PriceHistoryOut] = []
-    seller: Optional[SellerBrief] = None
 
     model_config = {"from_attributes": True}
 

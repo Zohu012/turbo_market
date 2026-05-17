@@ -50,6 +50,7 @@ export interface SellerBrief {
   city: string | null;
   total_listings: number;
   total_sold: number;
+  phones: string[];
 }
 
 export interface Vehicle {
@@ -76,9 +77,9 @@ export interface Vehicle {
   days_to_sell: number | null;
   url: string;
   primary_image: string | null;
+  seller?: SellerBrief | null;
   images?: VehicleImage[];
   price_history?: PriceHistoryPoint[];
-  seller?: SellerBrief | null;
 }
 
 export interface PagedResponse<T> {
