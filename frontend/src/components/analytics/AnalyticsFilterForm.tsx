@@ -74,7 +74,6 @@ export default function AnalyticsFilterForm({ filters, setFilters }: Props) {
   const [colors, setColors] = useState<string[]>([]);
   const [conditions, setConditions] = useState<string[]>([]);
   const [marketOptions, setMarketOptions] = useState<string[]>([]);
-  const [engineOptions, setEngineOptions] = useState<string[]>([]);
   const [cityOptions, setCityOptions] = useState<string[]>([]);
 
   useEffect(() => {
@@ -83,7 +82,6 @@ export default function AnalyticsFilterForm({ filters, setFilters }: Props) {
     vehiclesApi.colors().then((r) => setColors(r.data)).catch(() => {});
     vehiclesApi.conditions().then((r) => setConditions(r.data)).catch(() => {});
     vehiclesApi.marketOptions().then((r) => setMarketOptions(r.data)).catch(() => {});
-    vehiclesApi.engineOptions().then((r) => setEngineOptions(r.data)).catch(() => {});
     vehiclesApi.cities().then((r) => setCityOptions(r.data)).catch(() => {});
   }, []);
 
@@ -140,18 +138,8 @@ export default function AnalyticsFilterForm({ filters, setFilters }: Props) {
           {sel(filters.body_type ?? "", set("body_type"), AZ.filters.bodyType, AZ.options.bodyTypes)}
           {sel(filters.fuel_type ?? "", set("fuel_type"), AZ.filters.fuelType, AZ.options.fuelTypes)}
           {sel(filters.transmission ?? "", set("transmission"), AZ.filters.transmission, AZ.options.transmissions)}
-          <SearchableSelect
-            value={filters.engine_min ?? ""}
-            onChange={(v) => setFilters({ engine_min: v || undefined }, true)}
-            placeholder="Həcm min (sm³)"
-            options={engineOptions.map((e) => ({ value: e, label: `${e} sm³` }))}
-          />
-          <SearchableSelect
-            value={filters.engine_max ?? ""}
-            onChange={(v) => setFilters({ engine_max: v || undefined }, true)}
-            placeholder="Həcm max (sm³)"
-            options={engineOptions.map((e) => ({ value: e, label: `${e} sm³` }))}
-          />
+          {inp(filters.engine_min ?? "", set("engine_min"), "Həcm min (sm³)", "number")}
+          {inp(filters.engine_max ?? "", set("engine_max"), "Həcm max (sm³)", "number")}
           {inp(filters.hp_min ?? "", set("hp_min"), AZ.filters.hpFrom, "number")}
           {inp(filters.hp_max ?? "", set("hp_max"), AZ.filters.hpTo, "number")}
           {inp(filters.odometer_min ?? "", set("odometer_min"), AZ.filters.odometerFrom, "number")}

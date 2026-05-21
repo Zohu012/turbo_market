@@ -92,7 +92,6 @@ export default function FilterBar({ filters, setFilters, resetFilters }: Props) 
   const [colors, setColors] = useState<string[]>([]);
   const [conditions, setConditions] = useState<string[]>([]);
   const [marketOptions, setMarketOptions] = useState<string[]>([]);
-  const [engineOptions, setEngineOptions] = useState<string[]>([]);
   const [cityOptions, setCityOptions] = useState<string[]>([]);
 
   useEffect(() => {
@@ -101,7 +100,6 @@ export default function FilterBar({ filters, setFilters, resetFilters }: Props) 
     vehiclesApi.colors().then((r) => setColors(r.data)).catch(() => {});
     vehiclesApi.conditions().then((r) => setConditions(r.data)).catch(() => {});
     vehiclesApi.marketOptions().then((r) => setMarketOptions(r.data)).catch(() => {});
-    vehiclesApi.engineOptions().then((r) => setEngineOptions(r.data)).catch(() => {});
     vehiclesApi.cities().then((r) => setCityOptions(r.data)).catch(() => {});
   }, []);
 
@@ -209,18 +207,8 @@ export default function FilterBar({ filters, setFilters, resetFilters }: Props) 
             {sel("body_type", BODY_TYPES, "Ban növü")}
             {sel("fuel_type", FUEL_TYPES, "Yanacaq")}
             {sel("transmission", TRANSMISSIONS, "Sürətlər qutusu")}
-            <SearchableSelect
-              value={filters.engine_min}
-              onChange={(v) => setFilters({ engine_min: v || undefined }, true)}
-              placeholder="Həcm min (sm³)"
-              options={engineOptions.map((e) => ({ value: e, label: `${e} sm³` }))}
-            />
-            <SearchableSelect
-              value={filters.engine_max}
-              onChange={(v) => setFilters({ engine_max: v || undefined }, true)}
-              placeholder="Həcm max (sm³)"
-              options={engineOptions.map((e) => ({ value: e, label: `${e} sm³` }))}
-            />
+            {inp("engine_min", "Həcm min (sm³)", "number")}
+            {inp("engine_max", "Həcm max (sm³)", "number")}
             {inp("hp_min", "Güc min (HP)", "number")}
             {inp("hp_max", "Güc max (HP)", "number")}
             <SearchableSelect
