@@ -3,6 +3,7 @@ import { vehiclesApi, type FeatureOption } from "../../api/client";
 import { AnalyticsFilters } from "../../hooks/useAnalyticsFilters";
 import { useMakeModelOptions } from "../../hooks/useMakeModelOptions";
 import { AZ } from "../../i18n/az";
+import DebouncedInput from "../DebouncedInput";
 import SearchableSelect from "../SearchableSelect";
 
 interface Props {
@@ -138,12 +139,12 @@ export default function AnalyticsFilterForm({ filters, setFilters }: Props) {
           {sel(filters.body_type ?? "", set("body_type"), AZ.filters.bodyType, AZ.options.bodyTypes)}
           {sel(filters.fuel_type ?? "", set("fuel_type"), AZ.filters.fuelType, AZ.options.fuelTypes)}
           {sel(filters.transmission ?? "", set("transmission"), AZ.filters.transmission, AZ.options.transmissions)}
-          {inp(filters.engine_min ?? "", set("engine_min"), "Həcm min (sm³)", "number")}
-          {inp(filters.engine_max ?? "", set("engine_max"), "Həcm max (sm³)", "number")}
-          {inp(filters.hp_min ?? "", set("hp_min"), AZ.filters.hpFrom, "number")}
-          {inp(filters.hp_max ?? "", set("hp_max"), AZ.filters.hpTo, "number")}
-          {inp(filters.odometer_min ?? "", set("odometer_min"), AZ.filters.odometerFrom, "number")}
-          {inp(filters.odometer_max ?? "", set("odometer_max"), AZ.filters.odometerTo, "number")}
+          <DebouncedInput value={filters.engine_min ?? ""} onChange={(v) => setFilters({ engine_min: v || undefined }, true)} placeholder="Həcm min (sm³)" type="number" />
+          <DebouncedInput value={filters.engine_max ?? ""} onChange={(v) => setFilters({ engine_max: v || undefined }, true)} placeholder="Həcm max (sm³)" type="number" />
+          <DebouncedInput value={filters.hp_min ?? ""} onChange={(v) => setFilters({ hp_min: v || undefined }, true)} placeholder={AZ.filters.hpFrom} type="number" />
+          <DebouncedInput value={filters.hp_max ?? ""} onChange={(v) => setFilters({ hp_max: v || undefined }, true)} placeholder={AZ.filters.hpTo} type="number" />
+          <DebouncedInput value={filters.odometer_min ?? ""} onChange={(v) => setFilters({ odometer_min: v || undefined }, true)} placeholder={AZ.filters.odometerFrom} type="number" />
+          <DebouncedInput value={filters.odometer_max ?? ""} onChange={(v) => setFilters({ odometer_max: v || undefined }, true)} placeholder={AZ.filters.odometerTo} type="number" />
           <SearchableSelect
             value={filters.color ?? ""}
             onChange={(v) => setFilters({ color: v || undefined }, true)}
@@ -179,8 +180,8 @@ export default function AnalyticsFilterForm({ filters, setFilters }: Props) {
             placeholder={AZ.filters.city}
             options={cityOptions.map((c) => ({ value: c, label: c }))}
           />
-          {inp(filters.price_min ?? "", set("price_min"), AZ.filters.priceFrom, "number")}
-          {inp(filters.price_max ?? "", set("price_max"), AZ.filters.priceTo, "number")}
+          <DebouncedInput value={filters.price_min ?? ""} onChange={(v) => setFilters({ price_min: v || undefined }, true)} placeholder={AZ.filters.priceFrom} type="number" />
+          <DebouncedInput value={filters.price_max ?? ""} onChange={(v) => setFilters({ price_max: v || undefined }, true)} placeholder={AZ.filters.priceTo} type="number" />
           {sel(filters.seller_type ?? "", set("seller_type"), AZ.filters.sellerType,
             AZ.options.sellerTypes)}
           {sel(filters.credit ?? "", set("credit"), AZ.filters.isCredit, BOOL_OPTS)}

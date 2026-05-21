@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { vehiclesApi, type FeatureOption } from "../api/client";
 import { useMakeModelOptions } from "../hooks/useMakeModelOptions";
+import DebouncedInput from "./DebouncedInput";
 import SearchableSelect from "./SearchableSelect";
 
 export interface Filters {
@@ -207,10 +208,10 @@ export default function FilterBar({ filters, setFilters, resetFilters }: Props) 
             {sel("body_type", BODY_TYPES, "Ban növü")}
             {sel("fuel_type", FUEL_TYPES, "Yanacaq")}
             {sel("transmission", TRANSMISSIONS, "Sürətlər qutusu")}
-            {inp("engine_min", "Həcm min (sm³)", "number")}
-            {inp("engine_max", "Həcm max (sm³)", "number")}
-            {inp("hp_min", "Güc min (HP)", "number")}
-            {inp("hp_max", "Güc max (HP)", "number")}
+            <DebouncedInput value={filters.engine_min} onChange={(v) => setFilters({ engine_min: v || undefined }, true)} placeholder="Həcm min (sm³)" type="number" />
+            <DebouncedInput value={filters.engine_max} onChange={(v) => setFilters({ engine_max: v || undefined }, true)} placeholder="Həcm max (sm³)" type="number" />
+            <DebouncedInput value={filters.hp_min} onChange={(v) => setFilters({ hp_min: v || undefined }, true)} placeholder="Güc min (HP)" type="number" />
+            <DebouncedInput value={filters.hp_max} onChange={(v) => setFilters({ hp_max: v || undefined }, true)} placeholder="Güc max (HP)" type="number" />
             <SearchableSelect
               value={filters.color}
               onChange={(v) => setFilters({ color: v || undefined }, true)}
@@ -245,10 +246,10 @@ export default function FilterBar({ filters, setFilters, resetFilters }: Props) 
               placeholder="Şəhər"
               options={cityOptions.map((c) => ({ value: c, label: c }))}
             />
-            {inp("price_min", "Qiymət min (AZN)", "number")}
-            {inp("price_max", "Qiymət max (AZN)", "number")}
-            {inp("odometer_min", "Yürüş min (km)", "number")}
-            {inp("odometer_max", "Yürüş max (km)", "number")}
+            <DebouncedInput value={filters.price_min} onChange={(v) => setFilters({ price_min: v || undefined }, true)} placeholder="Qiymət min (AZN)" type="number" />
+            <DebouncedInput value={filters.price_max} onChange={(v) => setFilters({ price_max: v || undefined }, true)} placeholder="Qiymət max (AZN)" type="number" />
+            <DebouncedInput value={filters.odometer_min} onChange={(v) => setFilters({ odometer_min: v || undefined }, true)} placeholder="Yürüş min (km)" type="number" />
+            <DebouncedInput value={filters.odometer_max} onChange={(v) => setFilters({ odometer_max: v || undefined }, true)} placeholder="Yürüş max (km)" type="number" />
             {sel("seller_type", SELLER_TYPES, "Satıcı növü")}
             {sel("is_credit", BOOL_OPTS, "Kredit var")}
             {sel("is_barter", BOOL_OPTS, "Barter var")}
@@ -266,8 +267,8 @@ export default function FilterBar({ filters, setFilters, resetFilters }: Props) 
             {dateInp("date_added_to", "Əlavə tarixi (son)")}
             {dateInp("date_sold_from", "Satış tarixi (başlanğıc)")}
             {dateInp("date_sold_to", "Satış tarixi (son)")}
-            {inp("days_to_sell_min", "Satış günü (min)", "number")}
-            {inp("days_to_sell_max", "Satış günü (max)", "number")}
+            <DebouncedInput value={filters.days_to_sell_min} onChange={(v) => setFilters({ days_to_sell_min: v || undefined }, true)} placeholder="Satış günü (min)" type="number" />
+            <DebouncedInput value={filters.days_to_sell_max} onChange={(v) => setFilters({ days_to_sell_max: v || undefined }, true)} placeholder="Satış günü (max)" type="number" />
             {sel("status", [{ value: "active", label: "Aktiv" }, { value: "inactive", label: "Deaktiv" }], "Status")}
           </div>
         )}
