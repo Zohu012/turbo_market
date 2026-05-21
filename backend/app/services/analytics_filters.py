@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, time, timezone
 from typing import Optional
 
-from sqlalchemy import Select, and_, exists, func, select
+from sqlalchemy import Select, and_, cast, exists, func, select
 
 from app.models.seller import Seller
 from app.models.vehicle import Vehicle, VehicleFeature
@@ -22,9 +22,9 @@ def _engine_cc_expr():
     Slow — only invoked when an engine_min/max filter is set.
     """
     from sqlalchemy import Integer
-    return func.cast(
+    return cast(
         (func.regexp_match(Vehicle.engine, r"^(\d+)$"))[1],
-        type_=Integer,
+        Integer,
     )
 
 
