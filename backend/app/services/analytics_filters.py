@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, time, timezone
 from typing import Optional
 
-from sqlalchemy import Select, and_, cast, exists, func, select
+from sqlalchemy import Select, and_, case, cast, exists, func, select
 
 from app.models.seller import Seller
 from app.models.vehicle import Vehicle, VehicleFeature
@@ -19,12 +19,16 @@ from app.schemas.analytics_filters import AnalyticsFilters
 def _engine_cc_expr():
     """Postgres expression: cast the engine column (stored as integer cc string,
     e.g. '1500') to INTEGER. Returns NULL for non-numeric values (Elektro, etc.).
-    Slow — only invoked when an engine_min/max filter is set.
+    Only invoked when an engine_min/max filter is set.
+
+    Uses CASE/~ instead of regexp_match()[1] because SQLAlchemy's func.*
+    returns an untyped expression that does not support the getitem operator.
+    Generates: CASE WHEN engine ~ '^\\d+$' THEN CAST(engine AS INTEGER) ELSE NULL END
     """
     from sqlalchemy import Integer
-    return cast(
-        (func.regexp_match(Vehicle.engine, r"^(\d+)$"))[1],
-        Integer,
+    return case(
+        (Vehicle.engine.op("~")(r"^\d+$"), cast(Vehicle.engine, Integer)),
+        else_=None,
     )
 
 
